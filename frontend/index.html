@@ -1,0 +1,242 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Blog Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+
+<div class="masthead">
+  <div>
+    <div class="kicker">Content System</div>
+    <h1>Blog Agent</h1>
+  </div>
+  <div class="tagline">Turn one idea into a publish-ready story.</div>
+</div>
+
+<div class="layout">
+
+  <div class="brief-panel">
+    <form id="brief-form">
+
+      <div class="section-label">Content <span class="hint-link">Start with one clear idea</span></div>
+
+      <div class="field">
+        <label for="keyword">Main Keyword *</label>
+        <input type="text" id="keyword" placeholder="e.g. how to choose linen table runners" required maxlength="200">
+        <div class="word-count-display"><span id="keyword-count" class="char-count">0</span>/200</div>
+      </div>
+
+      <div class="field">
+        <label for="title">Title</label>
+        <input type="text" id="title" placeholder="Auto-generated from keyword if left empty" maxlength="200">
+        <div class="hint">Leave empty to auto-generate from SERP analysis</div>
+      </div>
+
+      <div class="section-label">Writing Settings <span class="hint-link">Shape the voice</span></div>
+
+      <div class="row3">
+        <div class="field">
+          <label for="size">Article Size</label>
+          <select id="size">
+            <option value="x-small">X-Small (600-800)</option>
+            <option value="small">Small (750-1050)</option>
+            <option value="medium" selected>Medium (1400-2100)</option>
+            <option value="large">Large (1900-2900)</option>
+            <option value="x-large">X-Large (2900-4300)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="article-type">Article Type</label>
+          <select id="article-type">
+            <option value="" selected>None</option>
+            <option value="how-to">How-to guide</option>
+            <option value="listicle">Listicle</option>
+            <option value="review">Product review</option>
+            <option value="news">News</option>
+            <option value="comparison">Comparison</option>
+            <option value="case-study">Case study</option>
+            <option value="opinion">Opinion piece</option>
+            <option value="tutorial">Tutorial</option>
+            <option value="roundup">Roundup post</option>
+            <option value="qa">Q&A page</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tone">Tone of Voice</label>
+          <select id="tone">
+            <option value="friendly" selected>Friendly</option>
+            <option value="professional">Professional</option>
+            <option value="informational">Informational</option>
+            <option value="transactional">Transactional</option>
+            <option value="inspirational">Inspirational</option>
+            <option value="neutral">Neutral</option>
+            <option value="witty">Witty</option>
+            <option value="casual">Casual</option>
+            <option value="authoritative">Authoritative</option>
+            <option value="encouraging">Encouraging</option>
+            <option value="persuasive">Persuasive</option>
+            <option value="poetic">Poetic</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row3">
+        <div class="field">
+          <label for="pov">Point of View</label>
+          <select id="pov">
+            <option value="" selected>None</option>
+            <option value="first-singular">First person singular (I, me, my)</option>
+            <option value="first-plural">First person plural (we, us, our)</option>
+            <option value="second">Second person (you, your)</option>
+            <option value="third">Third person (he, she, it, they)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="readability">Readability</label>
+          <select id="readability">
+            <option value="" selected>None</option>
+            <option value="5th">5th grade</option>
+            <option value="6th">6th grade</option>
+            <option value="7th">7th grade</option>
+            <option value="8th-9th" selected>8th & 9th grade (Recommended)</option>
+            <option value="10th-12th">10th to 12th grade</option>
+            <option value="college">College</option>
+            <option value="college-grad">College graduate</option>
+            <option value="professional">Professional</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="language">Language</label>
+          <select id="language">
+            <option value="en-US">English (US)</option>
+            <option value="en-GB">English (UK)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="instructions">Additional Instructions</label>
+        <textarea id="instructions" placeholder="e.g. Keep the tone practical and editorial. Avoid overstating durability claims."></textarea>
+      </div>
+
+      <div class="section-label">Structure <span class="hint-link">Choose what appears</span></div>
+
+      <div class="structure-grid" style="margin-bottom: 10px;">
+        <label class="pill-toggle active" data-for="include-tables">
+          <input type="checkbox" id="include-tables"> Tables
+        </label>
+        <label class="pill-toggle active" data-for="include-h3">
+          <input type="checkbox" id="include-h3" checked> H3
+        </label>
+        <label class="pill-toggle active" data-for="include-lists">
+          <input type="checkbox" id="include-lists" checked> Lists
+        </label>
+        <label class="pill-toggle" data-for="include-quotes">
+          <input type="checkbox" id="include-quotes"> Quotes
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <span class="toggle-label">Include FAQ</span>
+        <label class="toggle"><input type="checkbox" id="include-faq" checked><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">Include Key Takeaways</span>
+        <label class="toggle"><input type="checkbox" id="include-takeaways" checked><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">Include Conclusion</span>
+        <label class="toggle"><input type="checkbox" id="include-conclusion" checked><span class="slider"></span></label>
+      </div>
+
+      <div class="row2" style="margin-top: 12px;">
+        <div class="field">
+          <label for="hook">Opening Hook</label>
+          <select id="hook">
+            <option value="question" selected>Question</option>
+            <option value="statistic">Statistic</option>
+            <option value="fact">Fact</option>
+            <option value="anecdote">Anecdote</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="hook-brief">Hook Brief</label>
+          <input type="text" id="hook-brief" placeholder="e.g. surprising linen fact" maxlength="200">
+        </div>
+      </div>
+
+      <div class="section-label">Brand <span class="hint-link">Make it yours</span></div>
+
+      <div class="row2">
+        <div class="field">
+          <label for="brand-name">Brand Name</label>
+          <input type="text" id="brand-name" placeholder="e.g. Acme Home Goods" maxlength="200">
+        </div>
+        <div class="field">
+          <label for="website">Website</label>
+          <input type="text" id="website" placeholder="https://www.example.com" maxlength="300">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Brand Voice</label>
+        <select id="brand-voice-select">
+          <option value="" selected>None</option>
+          <option value="__create__">+ Create brand voice</option>
+        </select>
+      </div>
+
+      <div id="brand-voice-editor" class="brand-voice-box collapsed">
+        <div class="bv-header">
+          <span>Create Brand Voice</span>
+        </div>
+        <div class="bv-fields">
+          <div class="field">
+            <label for="bv-tone">Tone & Personality</label>
+            <input type="text" id="bv-tone" placeholder="e.g. Warm, confident, approachable">
+          </div>
+          <div class="field">
+            <label for="bv-vocabulary">Vocabulary Level</label>
+            <select id="bv-vocabulary">
+              <option value="" selected>Select...</option>
+              <option value="simple">Simple - everyday words</option>
+              <option value="moderate">Moderate - mix of common and specific</option>
+              <option value="advanced">Advanced - industry terminology</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="bv-style">Writing Style Notes</label>
+            <textarea id="bv-style" placeholder="e.g. Short sentences. Use contractions. Reference real products. Never sound corporate."></textarea>
+          </div>
+          <div class="field">
+            <label for="bv-donts">Avoid</label>
+            <input type="text" id="bv-donts" placeholder="e.g. jargon, hype words, superlatives">
+          </div>
+        </div>
+        <input type="hidden" id="brand-voice" value="">
+      </div>
+
+      <button type="submit" class="generate-btn" id="generate-btn">Generate Article</button>
+
+    </form>
+  </div>
+
+  <div class="divider" id="panel-divider"></div>
+
+  <div class="output-panel">
+    <div class="tracker" id="tracker"></div>
+    <div id="output-body">
+      <div class="empty-state">Enter a keyword and click Generate. The system will analyze competitors, create a brief, and generate a publish-ready article.</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

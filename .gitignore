@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Knowledge base / runtime data (rebuilt from BLOG_URL)
+data/
+backend/data/
+
+# Generated articles / output
+output/
+backend/output/
