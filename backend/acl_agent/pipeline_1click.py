@@ -22,23 +22,36 @@ from acl_agent.auto_brief import analyze_serp, auto_generate_brief
 from acl_agent.generation import extract_outline_from_markdown, generate_single_call_article
 from acl_agent.knowledge_base import retrieve_context
 from acl_agent.models import ContentBrief, SEOAnalysis
+from acl_agent.scraping import scrape_url_for_request
 from acl_agent.validation import validate_article
 
 
 def generate_full_pipeline(
     brief: ContentBrief,
+    extra_style_context: Optional[str] = None,
+    extra_fact_context: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Produces the full article and its SEO metadata from ONE model
     API call (retries only happen if the model's response fails
     schema, word-count, or originality checks - the happy path is
     exactly 1 request).
+
+    extra_style_context / extra_fact_context are optional fresh
+    scraps for THIS request only (e.g. a user-provided URL). When
+    present, they are prepended to the knowledge-base retrieval so
+    the article is grounded on the user's own site.
     """
     style_context = retrieve_context(
         query=brief.article_angle,
         top_k=HYBRID_STYLE_TOP_K,
         source_type="style",
     )
+
+    if extra_style_context:
+        style_context = (
+            f"{extra_style_context}\n\n{style_context}"
+        ).strip()
 
     if not style_context:
         logger.warning(
@@ -59,6 +72,11 @@ def generate_full_pipeline(
         top_k=HYBRID_FACT_TOP_K,
         source_type="article",
     )
+
+    if extra_fact_context:
+        fact_context = (
+            f"{extra_fact_context}\n\n{fact_context}"
+        ).strip()
 
     result = generate_single_call_article(
         brief=brief,
@@ -206,7 +224,50 @@ def generate_1click(
     logger.info("Step 3/3: Generating article...")
     emit("stage", stage="draft", status="running",
          message="Writing the full article - this is the slowest step...")
-    result = generate_full_pipeline(brief)
+
+    # Optional request-time scrape: only when the user EXPLICITLY
+    # provided a website at request time - scrape it fresh NOW so
+    # this article is grounded on that site. Skip when website is
+    # None (falls back to the pre-ingested BRAND_SITE from .env).
+    # Result is in-memory only - never persisted to the knowledge
+    # base or data/.
+    extra_style_context: Optional[str] = None
+    extra_fact_context: Optional[str] = None
+
+    if website:
+        logger.info(
+            "Request-time scrape of user-provided site: %s",
+            website,
+        )
+        emit("stage", stage="scrape", status="running",
+             message=f"Scraping {website} for this article...")
+        scraped = scrape_url_for_request(website)
+
+        if scraped:
+            extra_style_context = scraped
+            extra_fact_context = scraped
+            logger.info(
+                "Scraped %s characters from %s for this "
+                "request (in-memory only).",
+                len(scraped),
+                website,
+            )
+            emit("stage", stage="scrape", status="done",
+                 message="Scrape complete for this request")
+        else:
+            logger.info(
+                "No content scraped from %s - continuing with "
+                "knowledge base only.",
+                website,
+            )
+            emit("stage", stage="scrape", status="done",
+                 message="No content found to scrape - skipped")
+
+    result = generate_full_pipeline(
+        brief,
+        extra_style_context=extra_style_context,
+        extra_fact_context=extra_fact_context,
+    )
     emit("stage", stage="draft", status="done",
          message="Article drafted. Running SEO and validation...")
 

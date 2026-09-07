@@ -241,6 +241,82 @@ def load_urls_from_csv(
     return results
 
 
+def scrape_url_for_request(url: str) -> str:
+    """
+    Fresh, in-memory-only scrape of a user-provided URL for a single
+    generation request.
+
+    If the URL looks like a blog listing (its page links to
+    /blogs/... articles), the first few article links are also
+    scraped. Content is combined into one context string with
+    - URL - headers per source.
+
+    Returns an empty string if nothing could be scraped. The result
+    is NEVER written to the persistent knowledge base or data/ files.
+    """
+    try:
+        html = fetch_url(url)
+    except Exception as error:
+        logger.warning(
+            "Could not fetch request URL %s: %s",
+            url,
+            error,
+        )
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    article_links: list[str] = []
+    already_seen: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"].strip()
+        if "/blogs/" not in href:
+            continue
+        if href.startswith("/"):
+            href = url.rstrip("/") + href
+        href = href.split("?")[0].split("#")[0].rstrip("/")
+        if href and href not in already_seen:
+            already_seen.add(href)
+            article_links.append(href)
+
+    targets = [url]
+    targets.extend(
+        article_links[:2]
+    )
+
+    sections: list[str] = []
+
+    for target in targets[:3]:
+        try:
+            page = scrape_blog_content(target)
+            text = page["content"]
+        except Exception as error:
+            logger.warning(
+                "Could not scrape %s: %s",
+                target,
+                error,
+            )
+            continue
+
+        if not text:
+            continue
+
+        sections.append(
+            "\n".join(
+                [
+                    f"- URL -",
+                    page["title"] or url,
+                    target,
+                    "----------",
+                    text,
+                ]
+            )
+        )
+
+    return "\n\n".join(sections)
+
+
 def scrape_blog_content(url: str) -> dict[str, str]:
     html = fetch_url(url)
 

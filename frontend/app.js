@@ -1,4 +1,4 @@
-﻿const STAGES = ["SERP", "Brief", "Draft", "SEO", "Validate"];
+﻿const STAGES = ["SERP", "Brief", "Scrape", "Draft", "SEO", "Validate"];
 
 const API_BASE = "";
 
@@ -20,7 +20,7 @@ function renderTracker(activeIndex, elapsed) {
 function startTimer() {
   let elapsed = 0;
   let stageIdx = 0;
-  const stageAt = [0, 5, 10, 25, 40];
+  const stageAt = [0, 5, 10, 20, 35, 50];
   renderTracker(0, elapsed);
   _genTimer = setInterval(() => {
     elapsed++;
@@ -324,7 +324,7 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
     let buffer = "";
     let result = null;
 
-    const stageIndex = { serp: 0, brief: 1, draft: 2, seo: 3, validate: 4 };
+    const stageIndex = { serp: 0, brief: 1, scrape: 2, draft: 3, seo: 4, validate: 5 };
 
     while (true) {
       const { done, value } = await reader.read();
