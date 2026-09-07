@@ -16,6 +16,78 @@
     <h1>Blog Agent</h1>
   </div>
   <div class="tagline">Turn one idea into a publish-ready story.</div>
+  <button type="button" id="guide-btn" class="guide-btn">
+    <span class="guide-icon">?</span> How Blog Agent Works
+  </button>
+</div>
+
+<div id="guide-overlay" class="guide-overlay hidden">
+  <div class="guide-modal">
+    <div class="guide-header">
+      <h2>How Blog Agent Works</h2>
+      <button type="button" id="guide-close" class="guide-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="guide-body">
+
+      <div class="guide-step">
+        <div class="guide-step-num">1</div>
+        <div class="guide-step-body">
+          <h3>Enter a keyword</h3>
+          <p>Start with the topic or phrase you want to rank for (e.g. "how to choose linen table runners"). The system builds the entire article around this.</p>
+        </div>
+      </div>
+
+      <div class="guide-step">
+        <div class="guide-step-num">2</div>
+        <div class="guide-step-body">
+          <h3>SERP analysis</h3>
+          <p>Blog Agent analyzes your keyword's real search results: what competitors cover, which headings they use, related queries people ask, and ranking content gaps.</p>
+        </div>
+      </div>
+
+      <div class="guide-step">
+        <div class="guide-step-num">3</div>
+        <div class="guide-step-body">
+          <h3>Auto content brief</h3>
+          <p>The AI drafts a structured brief: title, target word count, required topics, secondary keywords, reader questions, and your formatting choices (H3s, tables, lists, hooks).</p>
+        </div>
+      </div>
+
+      <div class="guide-step">
+        <div class="guide-step-num">4</div>
+        <div class="guide-step-body">
+          <h3>Research grounding (optional)</h3>
+          <p>If you enter a <strong>Website</strong> URL, the system scrapes that site at request time so the article stays grounded on your brand's real content. It is used for that one article only and never stored.</p>
+        </div>
+      </div>
+
+      <div class="guide-step">
+        <div class="guide-step-num">5</div>
+        <div class="guide-step-body">
+          <h3>Single-call article generation</h3>
+          <p>One model call writes the full article in Markdown, plus SEO metadata: meta title, meta description, FAQs, and image alt text. Output streams to you progressively so you watch it happen.</p>
+        </div>
+      </div>
+
+      <div class="guide-step">
+        <div class="guide-step-num">6</div>
+        <div class="guide-step-body">
+          <h3>Validation & quality checks</h3>
+          <p>Every draft is checked for word count, exactly one H1, clean Markdown (lists and tables), fact accuracy (no invented statistics or pricing), keyword repetition, and original wording before it reaches you.</p>
+        </div>
+      </div>
+
+      <div class="guide-tips">
+        <h3>Pro tips</h3>
+        <ul>
+          <li><strong>Target Words</strong> lets you request any length from 300 to 8,000 words — it overrides the preset Article Size.</li>
+          <li><strong>Additional Instructions, Hook Brief, and Brand Voice</strong> are capped by word count to keep the brief focused.</li>
+          <li>Your <strong>User ID</strong> is attached automatically when you're logged in, so you can track which articles belong to which user.</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
 </div>
 
 <div id="auth-panel" class="layout auth-layout">
@@ -63,32 +135,22 @@
 
       <div class="section-label">Writing Settings <span class="hint-link">Shape the voice</span></div>
 
-      <div class="row3">
+<div class="row3">
         <div class="field">
           <label for="size">Article Size</label>
           <select id="size">
-            <option value="x-small">X-Small (600-800)</option>
-            <option value="small">Small (750-1050)</option>
-            <option value="medium" selected>Medium (1400-2100)</option>
-            <option value="large">Large (1900-2900)</option>
-            <option value="x-large">X-Large (2900-4300)</option>
+            <option value="" selected>Custom (target words)</option>
+            <option value="x-small">X-Small (600 words)</option>
+            <option value="small">Small (900 words)</option>
+            <option value="medium">Medium (1750 words)</option>
+            <option value="large">Large (2400 words)</option>
+            <option value="x-large">X-Large (3600 words)</option>
           </select>
         </div>
         <div class="field">
-          <label for="article-type">Article Type</label>
-          <select id="article-type">
-            <option value="" selected>None</option>
-            <option value="how-to">How-to guide</option>
-            <option value="listicle">Listicle</option>
-            <option value="review">Product review</option>
-            <option value="news">News</option>
-            <option value="comparison">Comparison</option>
-            <option value="case-study">Case study</option>
-            <option value="opinion">Opinion piece</option>
-            <option value="tutorial">Tutorial</option>
-            <option value="roundup">Roundup post</option>
-            <option value="qa">Q&A page</option>
-          </select>
+          <label for="target-words">Target Words</label>
+          <input type="number" id="target-words" placeholder="e.g. 1200" min="300" max="8000" step="50" value="">
+          <div class="hint">Custom word count (300–8000). Overrides size.</div>
         </div>
         <div class="field">
           <label for="tone">Tone of Voice</label>
@@ -108,6 +170,24 @@
           </select>
         </div>
       </div>
+
+      <div class="row3">
+        <div class="field">
+          <label for="article-type">Article Type</label>
+          <select id="article-type">
+            <option value="" selected>None</option>
+            <option value="how-to">How-to guide</option>
+            <option value="listicle">Listicle</option>
+            <option value="review">Product review</option>
+            <option value="news">News</option>
+            <option value="comparison">Comparison</option>
+            <option value="case-study">Case study</option>
+            <option value="opinion">Opinion piece</option>
+            <option value="tutorial">Tutorial</option>
+            <option value="roundup">Roundup post</option>
+            <option value="qa">Q&A page</option>
+          </select>
+        </div>
 
       <div class="row3">
         <div class="field">
@@ -143,9 +223,9 @@
         </div>
       </div>
 
-      <div class="field">
-        <label for="instructions">Additional Instructions</label>
-        <textarea id="instructions" placeholder="e.g. Keep the tone practical and editorial. Avoid overstating durability claims."></textarea>
+<div class="field">
+        <label for="instructions">Additional Instructions <span class="hint-link" id="instructions-count">0/150 words</span></label>
+        <textarea id="instructions" placeholder="e.g. Keep the tone practical and editorial. Avoid overstating durability claims." maxlength="1000"></textarea>
       </div>
 
       <div class="section-label">Structure <span class="hint-link">Choose what appears</span></div>
@@ -188,8 +268,8 @@
             <option value="anecdote">Anecdote</option>
           </select>
         </div>
-        <div class="field">
-          <label for="hook-brief">Hook Brief</label>
+<div class="field">
+          <label for="hook-brief">Hook Brief <span class="hint-link" id="hook-brief-count">0/30 words</span></label>
           <input type="text" id="hook-brief" placeholder="e.g. surprising linen fact" maxlength="200">
         </div>
       </div>
@@ -240,9 +320,9 @@
               <option value="advanced">Advanced - industry terminology</option>
             </select>
           </div>
-          <div class="field">
-            <label for="bv-style">Writing Style Notes</label>
-            <textarea id="bv-style" placeholder="e.g. Short sentences. Use contractions. Reference real products. Never sound corporate."></textarea>
+<div class="field">
+            <label for="bv-style">Writing Style Notes <span class="hint-link" id="bv-style-count">0/60 words</span></label>
+            <textarea id="bv-style" placeholder="e.g. Short sentences. Use contractions. Reference real products. Never sound corporate." maxlength="400"></textarea>
           </div>
           <div class="field">
             <label for="bv-donts">Avoid</label>

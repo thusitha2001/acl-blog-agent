@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError
 
 from acl_agent import knowledge_base
@@ -137,6 +137,12 @@ class OneClickRequest(BaseModel):
         default="medium",
         description="Article size: x-small, small, medium, large, or x-large",
     )
+    target_word_count: Optional[int] = Field(
+        default=None,
+        ge=300,
+        le=8000,
+        description="Exact target word count. Overrides size when provided.",
+    )
     article_type: Optional[str] = Field(
         default=None,
         description="Article type: how-to, listicle, review, news, comparison, case-study, opinion, tutorial, roundup, qa",
@@ -152,11 +158,6 @@ class OneClickRequest(BaseModel):
     readability: Optional[str] = Field(
         default=None,
         description="Text readability level",
-    )
-    brand_voice: Optional[str] = Field(
-        default=None,
-        max_length=500,
-        description="Brand voice description",
     )
     language: str = Field(
         default="en-US",
@@ -208,20 +209,51 @@ class OneClickRequest(BaseModel):
         default=True,
         description="Use bold for emphasis",
     )
-    hook_type: str = Field(
-        default="question",
-        description="Opening hook type",
+    additional_instructions: str = Field(
+        default="",
+        max_length=1000,
+        description="Additional instructions (max 150 words)",
     )
     hook_brief: Optional[str] = Field(
         default=None,
         max_length=200,
-        description="Brief description of the hook for the opening sentence",
+        description="Brief description of the hook for the opening sentence (max 30 words)",
     )
-    additional_instructions: str = Field(
-        default="",
-        max_length=1000,
-        description="Additional instructions",
+    brand_voice: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Brand voice description (max 100 words)",
     )
+
+    @field_validator("additional_instructions")
+    @classmethod
+    def _word_limit_instructions(cls, value: str) -> str:
+        if len(value.split()) > 150:
+            raise ValueError(
+                "Additional Instructions must be 150 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
+
+    @field_validator("hook_brief")
+    @classmethod
+    def _word_limit_hook_brief(cls, value: Optional[str]) -> Optional[str]:
+        if value and len(value.split()) > 30:
+            raise ValueError(
+                "Hook Brief must be 30 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
+
+    @field_validator("brand_voice")
+    @classmethod
+    def _word_limit_brand_voice(cls, value: Optional[str]) -> Optional[str]:
+        if value and len(value.split()) > 100:
+            raise ValueError(
+                "Brand Voice must be 100 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
 
 
 class AuthRequest(BaseModel):
@@ -297,6 +329,7 @@ def generate_1click_endpoint(
             keyword=request.keyword,
             title=request.title,
             size=request.size,
+            target_word_count=request.target_word_count,
             article_type=request.article_type,
             tone=request.tone,
             point_of_view=request.point_of_view,
@@ -371,6 +404,7 @@ async def generate_1click_stream_endpoint(
                     keyword=request.keyword,
                     title=request.title,
                     size=request.size,
+                    target_word_count=request.target_word_count,
                     article_type=request.article_type,
                     tone=request.tone,
                     point_of_view=request.point_of_view,

@@ -1243,3 +1243,163 @@
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Guide button + modal */
+.guide-btn {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.guide-btn:hover {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.guide-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--teal);
+  color: #06231a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.masthead {
+  position: relative;
+}
+
+.guide-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(3, 12, 8, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.guide-overlay.hidden {
+  display: none;
+}
+
+.guide-modal {
+  width: 100%;
+  max-width: 620px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--paper-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.guide-header h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  color: var(--ink);
+}
+
+.guide-close {
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+
+.guide-close:hover {
+  color: var(--ink);
+}
+
+.guide-body {
+  padding: 1.5rem;
+}
+
+.guide-step {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.4rem;
+}
+
+.guide-step-num {
+  flex: 0 0 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--teal-soft);
+  border: 1px solid var(--teal);
+  color: var(--teal);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.guide-step-body h3 {
+  margin: 0 0 0.35rem;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.guide-step-body p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.guide-tips {
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  background: var(--teal-soft);
+}
+
+.guide-tips h3 {
+  margin: 0 0 0.5rem;
+  font-size: 14px;
+  color: var(--teal);
+}
+
+.guide-tips ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.guide-tips li {
+  margin-bottom: 0.4rem;
+  line-height: 1.5;
+}

@@ -389,6 +389,7 @@ def auto_generate_brief(
     serp: SERPAnalysis,
     title: Optional[str] = None,
     size: str = "medium",
+    target_word_count: Optional[int] = None,
     article_type: Optional[str] = None,
     tone: str = "friendly",
     point_of_view: Optional[str] = None,
@@ -414,7 +415,12 @@ def auto_generate_brief(
     Generate a complete ContentBrief from SERP data and user
     settings via a single LLM call.
     """
-    target_word_count = SIZE_MAP.get(size, 1750)
+    if target_word_count is not None:
+        target_word_count = int(
+            max(300, min(8000, target_word_count))
+        )
+    else:
+        target_word_count = SIZE_MAP.get(size, 1750)
 
     # Build SERP context for the LLM
     serp_context = _format_serp_context(serp)

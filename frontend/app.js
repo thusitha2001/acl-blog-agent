@@ -157,6 +157,41 @@ document.getElementById("keyword").addEventListener("input", function() {
   count.className = len > 200 ? "char-count over" : "char-count";
 });
 
+function wordCountOf(str) {
+  return str ? str.split(/\s+/).filter(Boolean).length : 0;
+}
+
+function updateWordCountLabel(inputId, labelId, limit) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  const fn = () => {
+    const label = document.getElementById(labelId);
+    if (!label) return;
+    const n = wordCountOf(el.value.trim());
+    label.textContent = n + "/" + limit + " words";
+    label.style.color = n > limit ? "var(--rust)" : "";
+  };
+  el.addEventListener("input", fn);
+  fn();
+}
+
+updateWordCountLabel("instructions", "instructions-count", 150);
+updateWordCountLabel("hook-brief", "hook-brief-count", 30);
+updateWordCountLabel("bv-style", "bv-style-count", 60);
+
+// "How Blog Agent Works" guide modal
+const guideOverlay = document.getElementById("guide-overlay");
+function openGuide() { guideOverlay.classList.remove("hidden"); }
+function closeGuide() { guideOverlay.classList.add("hidden"); }
+document.getElementById("guide-btn").addEventListener("click", openGuide);
+document.getElementById("guide-close").addEventListener("click", closeGuide);
+guideOverlay.addEventListener("click", (e) => {
+  if (e.target === guideOverlay) closeGuide();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !guideOverlay.classList.contains("hidden")) closeGuide();
+});
+
 document.querySelectorAll(".pill-toggle").forEach(pill => {
   const checkbox = pill.querySelector("input[type=checkbox]");
   if (checkbox.checked) pill.classList.add("active");
@@ -386,6 +421,35 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
   e.preventDefault();
 
   const btn = document.getElementById("generate-btn");
+
+  // Client-side validation
+  const instructionsVal = document.getElementById("instructions").value.trim();
+  const hookBriefVal = document.getElementById("hook-brief").value.trim();
+  const brandVoiceVal = buildBrandVoice() || "";
+  const targetWordsVal = document.getElementById("target-words").value.trim();
+
+  const wordCount = (s) => s ? s.split(/\s+/).filter(Boolean).length : 0;
+
+  if (wordCount(instructionsVal) > 150) {
+    alert("Additional Instructions is limited to 150 words.");
+    return;
+  }
+  if (wordCount(hookBriefVal) > 30) {
+    alert("Hook Brief is limited to 30 words.");
+    return;
+  }
+  if (wordCount(brandVoiceVal) > 100) {
+    alert("Brand Voice is limited to 100 words.");
+    return;
+  }
+  if (targetWordsVal !== "") {
+    const n = parseInt(targetWordsVal, 10);
+    if (isNaN(n) || n < 300 || n > 8000) {
+      alert("Target Words must be between 300 and 8000.");
+      return;
+    }
+  }
+
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Analyzing SERP & generating...';
 
@@ -397,6 +461,7 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
     keyword: document.getElementById("keyword").value.trim(),
     title: document.getElementById("title").value.trim() || null,
     size: document.getElementById("size").value,
+    target_word_count: parseInt(document.getElementById("target-words").value, 10) || null,
     article_type: document.getElementById("article-type").value || null,
     tone: document.getElementById("tone").value,
     point_of_view: document.getElementById("pov").value || null,
