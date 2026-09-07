@@ -291,6 +291,7 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
     brand_voice: buildBrandVoice(),
     language: document.getElementById("language").value,
     brand_name: document.getElementById("brand-name").value.trim() || null,
+    user_id: document.getElementById("user-id").value.trim() || null,
     website: document.getElementById("website").value.trim() || null,
     include_faq: document.getElementById("include-faq").checked,
     include_takeaways: document.getElementById("include-takeaways").checked,

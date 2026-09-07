@@ -116,6 +116,12 @@ def generate_full_endpoint(
 
 
 class OneClickRequest(BaseModel):
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Optional user identifier. Included in the result "
+        "payload and SSE events for per-user tracking.",
+    )
     keyword: str = Field(
         min_length=2,
         max_length=200,
@@ -236,6 +242,7 @@ def generate_1click_endpoint(
             language=request.language,
             brand_name=request.brand_name,
             website=request.website,
+            user_id=request.user_id,
             include_faq=request.include_faq,
             include_takeaways=request.include_takeaways,
             include_conclusion=request.include_conclusion,
@@ -253,6 +260,7 @@ def generate_1click_endpoint(
         )
 
         result["request_id"] = request_id
+        result["user_id"] = request.user_id
         return result
 
     except Exception as error:
@@ -283,6 +291,7 @@ async def generate_1click_stream_endpoint(
 
         def emit(event_type: str, data: dict) -> None:
             data["request_id"] = request_id
+            data["user_id"] = request.user_id
             asyncio.run_coroutine_threadsafe(
                 queue.put((event_type, data)),
                 worker_loop,
@@ -306,6 +315,7 @@ async def generate_1click_stream_endpoint(
                     language=request.language,
                     brand_name=request.brand_name,
                     website=request.website,
+                    user_id=request.user_id,
                     include_faq=request.include_faq,
                     include_takeaways=request.include_takeaways,
                     include_conclusion=request.include_conclusion,
@@ -329,6 +339,7 @@ async def generate_1click_stream_endpoint(
                     await queue.put(("error", {
                         "message": str(error),
                         "request_id": request_id,
+                        "user_id": request.user_id,
                     }))
                 else:
                     await queue.put(("result", result))

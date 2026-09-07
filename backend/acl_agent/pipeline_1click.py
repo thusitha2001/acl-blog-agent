@@ -132,6 +132,7 @@ def generate_1click(
     language: str = "en-US",
     brand_name: Optional[str] = None,
     website: Optional[str] = None,
+    user_id: Optional[str] = None,
     include_faq: bool = True,
     include_takeaways: bool = True,
     include_conclusion: bool = True,
@@ -164,8 +165,9 @@ def generate_1click(
     _site = website or BRAND_SITE
 
     logger.info(
-        "=== 1-Click Generation: '%s' ===",
+        "=== 1-Click Generation: '%s' (user_id=%s) ===",
         keyword,
+        user_id,
     )
 
     def emit(event_type: str, **payload: Any) -> None:
@@ -287,10 +289,12 @@ def generate_1click(
         "common_headings": serp.common_headings,
         "related_queries": serp.related_queries,
     }
+    result["user_id"] = user_id
 
     logger.info(
-        "=== 1-Click Generation Complete: '%s' ===",
+        "=== 1-Click Generation Complete: '%s' (user_id=%s) ===",
         keyword,
+        user_id,
     )
 
     return result
