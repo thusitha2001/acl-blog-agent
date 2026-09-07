@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -336,6 +337,12 @@ async def generate_1click_stream_endpoint(
 
         task = asyncio.create_task(runner())
 
+        # Keep-alive interval (seconds). Proxies like ngrok drop idle
+        # connections, so during long model calls we send an SSE
+        # comment line to keep the tunnel/browser connection alive.
+        KEEPALIVE_INTERVAL = 15.0
+        last_keepalive = time.monotonic()
+
         try:
             while True:
                 try:
@@ -343,6 +350,12 @@ async def generate_1click_stream_endpoint(
                         queue.get(), timeout=0.5
                     )
                 except asyncio.TimeoutError:
+                    if (
+                        time.monotonic() - last_keepalive
+                        >= KEEPALIVE_INTERVAL
+                    ):
+                        last_keepalive = time.monotonic()
+                        yield ": keepalive\n\n"
                     continue
 
                 if event_type == "__done__":
@@ -350,6 +363,7 @@ async def generate_1click_stream_endpoint(
 
                 event_data = json.dumps(data, default=str)
                 yield f"event: {event_type}\ndata: {event_data}\n\n"
+                last_keepalive = time.monotonic()
 
                 if event_type == "result":
                     break

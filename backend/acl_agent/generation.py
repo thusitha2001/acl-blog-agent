@@ -23,6 +23,7 @@ from acl_agent.models import (
 from acl_agent.validation import (
     check_originality,
     count_h1,
+    keyword_count,
     word_count,
     word_count_band,
 )
@@ -243,12 +244,23 @@ STRUCTURE - REQUIRED
 - Exactly one H1 (the article title), using Markdown "# ".
 - 4-8 H2 sections using Markdown "## ", each covering one required
   topic or a distinct angle on the primary keyword.
+- H3 (###) SUBHEADINGS ARE FORBIDDEN unless the CONTENT BRIEF's
+  additional_instructions explicitly requests them. Never create
+  H3s on your own. Use only H2 sections unless explicitly told
+  otherwise.
 - The CONTENT BRIEF below includes FORMATTING REQUIREMENTS in its
   additional_instructions field. Follow ALL of them exactly:
   if it says use H3, use H3; if it says use tables, use Markdown
   tables with | pipe syntax; if it says use lists, use lists;
   if it says use blockquotes, use blockquotes; if it says use
   italics or bold, use them throughout the article.
+- MARKDOWN SYNTAX — STRICT: Lists MUST use "- item" or "* item"
+  syntax (never HTML <ul><li>). Tables MUST use the pipe syntax:
+  | header1 | header2 | with a separator row |---|---| on the
+  next line. Do NOT use HTML tags for lists or tables. Do NOT
+  mix different list markers in the same list. Every list item
+  must start with "- " or "* ". Do NOT use numbered lists unless
+  the brief explicitly requests them.
 - When tables are requested, include at least one Markdown table
   (| col1 | col2 | format) with a header row and separator row.
   Place it in the most relevant section. Tables are REQUIRED when
@@ -260,6 +272,29 @@ STRUCTURE - REQUIRED
 - Answer the reader's main question within the first 150 words.
 - End the final section with a concrete, useful next step - not a
   heading called "Conclusion" and not a generic summary paragraph.
+
+REPETITION - REQUIRED
+- Do NOT repeat the primary keyword or topic in every section.
+  Spread mentions evenly across the article. Any single word or
+  phrase must not appear more than twice in any individual
+  section. Use synonyms, related terms, and natural language
+  variations instead of repeating the keyword.
+
+FACT VERIFICATION — REQUIRED
+- NEVER invent statistics, historical dates, pricing figures,
+  rarity levels, mining details, certifications, or product specs
+  unless they are EXPLICITLY stated in the VERIFIED FACTS section
+  below or the brief's product_facts.
+- If a claim about history, price, rarity, mining, or a specific
+  fact cannot be verified from the provided VERIFIED FACTS or
+  product_facts, do NOT state it. Replace with a general,
+  verifiable statement or omit it entirely.
+- Do NOT use phrases like "historically," "since ancient times,"
+  "costs $X," "worth $Y," "rare," "limited edition," "mined in
+  Z country," or specific numerical claims unless they appear in
+  the VERIFIED FACTS source material.
+- When in doubt about any factual claim, omit it rather than
+  fabricate it.
 
 LENGTH - REQUIRED, STRICT
 - The user's target word count for this article is EXACTLY
@@ -328,12 +363,76 @@ schema.
 
     def extra_validate(parsed: SingleCallArticle) -> Optional[str]:
         count = word_count(parsed.article_markdown)
+        article = parsed.article_markdown
+        issues: list[str] = []
 
-        if count_h1(parsed.article_markdown) != 1:
+        if count_h1(article) != 1:
             return (
                 "the article must contain exactly one H1 heading "
                 "(a single line starting with '# ')"
             )
+
+        # Heading hierarchy — no H3 unless explicitly requested
+        if not brief.include_h3:
+            h3_matches = re.findall(r"^###\s+.+$", article, flags=re.MULTILINE)
+            if h3_matches:
+                return (
+                    "H3 subheadings (###) are not allowed in this "
+                    "article. Use only H2 (##) sections. Remove "
+                    "all H3 headings."
+                )
+
+        # Markdown rendering — lists must use - or *, tables use |
+        for line in article.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("<ul") or stripped.startswith("<li") \
+                    or stripped.startswith("<ol") or "<li>" in stripped:
+                issues.append(
+                    "HTML list tags (<ul>, <li>, <ol>) are not "
+                    "allowed. Use Markdown '- item' or '* item'."
+                )
+            if stripped.startswith("<table") or "<td>" in stripped \
+                    or "<tr>" in stripped:
+                issues.append(
+                    "HTML table tags are not allowed. Use "
+                    "Markdown pipe tables (| col | col |)."
+                )
+
+        # Repetition — keyword must not dominate any section
+        kw = brief.primary_keyword
+        kw_count = keyword_count(article, kw)
+        if kw_count > 0:
+            sections = re.split(r"^##\s+.+$", article, flags=re.MULTILINE)
+            for section in sections:
+                if keyword_count(section, kw) > 2:
+                    issues.append(
+                        f"The keyword '{kw}' appears too many times "
+                        "in one section. Spread mentions evenly across "
+                        "the article and use synonyms."
+                    )
+                    break
+
+        # Fact verification — flag suspicious unsupported claims
+        fact_keywords = ["historically", "ancient", "since", "costs",
+                         "cost$", "worth", "price", "priced at", "rare",
+                         "rarity", "limited edition", "mined", "mining",
+                         "invented", "discovered", "first", "oldest",
+                         "million years", "billion"]
+        article_lower = article.lower()
+        for kw_fact in fact_keywords:
+            if kw_fact in article_lower and kw_fact not in (
+                fact_context + "\n" + str(brief.product_facts)
+            ).lower():
+                issues.append(
+                    f"Claim may reference an unsupported fact "
+                    f"('{kw_fact}'). Only state facts that appear in "
+                    f"the VERIFIED FACTS or product_facts source "
+                    f"material. Remove or verify this claim."
+                )
+                break
+
+        if issues:
+            return "; ".join(issues)
 
         originality_issue = check_originality(
             parsed.article_markdown,

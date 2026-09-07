@@ -578,6 +578,22 @@ PRIMARY KEYWORD: {keyword}
 SIZE: {size} ({target_word_count} words)
 TONE: {tone}
 LANGUAGE: {language}
+BRAND_WEBSITE: {website}
+
+INTERNAL LINKS RULE — CRITICAL:
+Every internal link URL in the "internal_links" field MUST
+belong to the BRAND_WEBSITE above (or be a sub-path of it).
+NEVER invent, fabricate, or guess URLs. Only use URLs that
+are actually discoverable on the BRAND_WEBSITE. If the brand
+website has no relevant internal pages, return an empty
+internal_links list []. Do NOT use URLs from competitors
+or any other external source.
+
+ARTICLE SCRAPING RULE — CRITICAL:
+Only scrape content from the BRAND_WEBSITE and BLOG_URL
+provided by the user. Do NOT scrape or reference any other
+website for internal links or facts. All internal links must
+come from the brand website only.
 
 {article_type_instruction}
 {pov_instruction}
