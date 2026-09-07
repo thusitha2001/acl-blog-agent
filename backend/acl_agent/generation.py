@@ -373,7 +373,10 @@ schema.
             )
 
         # Heading hierarchy — no H3 unless explicitly requested
-        if not brief.include_h3:
+        instructions_lower = brief.additional_instructions.lower()
+        h3_allowed = "h3" in instructions_lower or "###" in instructions_lower
+
+        if not h3_allowed:
             h3_matches = re.findall(r"^###\s+.+$", article, flags=re.MULTILINE)
             if h3_matches:
                 return (
@@ -398,17 +401,23 @@ schema.
                     "Markdown pipe tables (| col | col |)."
                 )
 
-        # Repetition — keyword must not dominate any section
+        # Repetition — keyword must not dominate any single section
         kw = brief.primary_keyword
         kw_count = keyword_count(article, kw)
         if kw_count > 0:
             sections = re.split(r"^##\s+.+$", article, flags=re.MULTILINE)
             for section in sections:
-                if keyword_count(section, kw) > 2:
+                section_count = keyword_count(section, kw)
+                section_words = max(len(section.split()), 1)
+                # Allow natural usage: up to 3 mentions plus one per
+                # ~40 words. Flag only clearly repetitive sections.
+                limit = 3 + section_words // 40
+                if section_count > limit:
                     issues.append(
-                        f"The keyword '{kw}' appears too many times "
-                        "in one section. Spread mentions evenly across "
-                        "the article and use synonyms."
+                        f"The keyword '{kw}' appears {section_count} "
+                        f"times in one section (limit {limit}). "
+                        "Spread mentions evenly across the article "
+                        "and use synonyms."
                     )
                     break
 
