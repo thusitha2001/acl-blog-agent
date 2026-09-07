@@ -10,7 +10,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from pydantic import ValidationError
 
 from acl_agent import knowledge_base
+from acl_agent.auth import login_user, signup_user, verify_token
 from acl_agent.config import (
     ALLOWED_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
@@ -223,9 +224,71 @@ class OneClickRequest(BaseModel):
     )
 
 
+class AuthRequest(BaseModel):
+    name: str = Field(
+        min_length=1,
+        max_length=100,
+        description="User name",
+    )
+    password: str = Field(
+        min_length=4,
+        max_length=200,
+        description="Password",
+    )
+
+
+def require_auth(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """FastAPI dependency: validates the bearer token and returns the user."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Missing or invalid Authorization header"},
+        )
+    user = verify_token(authorization[len("Bearer "):].strip())
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Invalid or expired token - please log in"},
+        )
+    return user
+
+
+@app.post("/auth/signup")
+def auth_signup(request: AuthRequest):
+    try:
+        user = signup_user(request.name, request.password)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(error)},
+        ) from error
+    return user
+
+
+@app.post("/auth/login")
+def auth_login(request: AuthRequest):
+    user = login_user(request.name, request.password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "message": "Invalid name or password - please try again",
+            },
+        )
+    return user
+
+
+@app.get("/auth/me")
+def auth_me(user: dict = Depends(require_auth)):
+    return user
+
+
 @app.post("/generate-1click")
 def generate_1click_endpoint(
     request: OneClickRequest,
+    user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
 
@@ -242,7 +305,7 @@ def generate_1click_endpoint(
             language=request.language,
             brand_name=request.brand_name,
             website=request.website,
-            user_id=request.user_id,
+            user_id=user["user_id"],
             include_faq=request.include_faq,
             include_takeaways=request.include_takeaways,
             include_conclusion=request.include_conclusion,
@@ -260,7 +323,7 @@ def generate_1click_endpoint(
         )
 
         result["request_id"] = request_id
-        result["user_id"] = request.user_id
+        result["user_id"] = user["user_id"]
         return result
 
     except Exception as error:
@@ -280,6 +343,7 @@ def generate_1click_endpoint(
 @app.post("/generate-1click-stream")
 async def generate_1click_stream_endpoint(
     request: OneClickRequest,
+    user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
     queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
@@ -291,7 +355,7 @@ async def generate_1click_stream_endpoint(
 
         def emit(event_type: str, data: dict) -> None:
             data["request_id"] = request_id
-            data["user_id"] = request.user_id
+            data["user_id"] = user["user_id"]
             asyncio.run_coroutine_threadsafe(
                 queue.put((event_type, data)),
                 worker_loop,
@@ -315,7 +379,7 @@ async def generate_1click_stream_endpoint(
                     language=request.language,
                     brand_name=request.brand_name,
                     website=request.website,
-                    user_id=request.user_id,
+                    user_id=user["user_id"],
                     include_faq=request.include_faq,
                     include_takeaways=request.include_takeaways,
                     include_conclusion=request.include_conclusion,
@@ -339,7 +403,7 @@ async def generate_1click_stream_endpoint(
                     await queue.put(("error", {
                         "message": str(error),
                         "request_id": request_id,
-                        "user_id": request.user_id,
+                        "user_id": user["user_id"],
                     }))
                 else:
                     await queue.put(("result", result))

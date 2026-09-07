@@ -18,7 +18,31 @@
   <div class="tagline">Turn one idea into a publish-ready story.</div>
 </div>
 
-<div class="layout">
+<div id="auth-panel" class="layout auth-layout">
+  <div class="brief-panel auth-panel-box">
+    <h2 id="auth-title">Log in</h2>
+    <p class="auth-sub" id="auth-sub">Enter your account to continue.</p>
+
+    <div class="field">
+      <label for="auth-name">Name</label>
+      <input type="text" id="auth-name" placeholder="e.g. Alice" maxlength="100">
+    </div>
+
+    <div class="field">
+      <label for="auth-password">Password</label>
+      <input type="password" id="auth-password" placeholder="••••••••" maxlength="200">
+    </div>
+
+    <div id="auth-error" class="auth-error"></div>
+
+    <div class="auth-actions">
+      <button type="button" id="auth-submit" class="btn-primary">Log in</button>
+      <button type="button" id="auth-toggle" class="btn-secondary">Create account</button>
+    </div>
+  </div>
+</div>
+
+<div id="app-panel" class="layout" style="display:none;">
 
   <div class="brief-panel">
     <form id="brief-form">

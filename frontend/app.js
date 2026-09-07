@@ -4,6 +4,119 @@ const API_BASE = "";
 
 let _genTimer = null;
 
+let _auth = null; // { name, user_id, token } or null
+
+function authHeaders() {
+  if (_auth && _auth.token) {
+    return { "Content-Type": "application/json", "Authorization": "Bearer " + _auth.token };
+  }
+  return { "Content-Type": "application/json" };
+}
+
+async function authApi(path, payload) {
+  const res = await fetch(API_BASE + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data.detail && data.detail.message ? data.detail.message
+      : (data.message || ("Request failed with status " + res.status));
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function showAuthPanel() {
+  document.getElementById("auth-panel").style.display = "flex";
+  document.getElementById("app-panel").style.display = "none";
+}
+
+function showAppPanel() {
+  document.getElementById("auth-panel").style.display = "none";
+  document.getElementById("app-panel").style.display = "flex";
+  document.getElementById("user-id").value = _auth ? _auth.user_id : "";
+}
+
+function setAuthError(msg) {
+  document.getElementById("auth-error").textContent = msg || "";
+}
+
+let _authMode = "login"; // "login" | "signup"
+
+function renderAuthMode() {
+  document.getElementById("auth-title").textContent =
+    _authMode === "login" ? "Log in" : "Create account";
+  document.getElementById("auth-sub").textContent =
+    _authMode === "login"
+      ? "Enter your account to continue."
+      : "Choose a name and password (min 4 chars).";
+  document.getElementById("auth-submit").textContent =
+    _authMode === "login" ? "Log in" : "Create account";
+  setAuthError("");
+}
+
+async function initAuth() {
+  const saved = localStorage.getItem("blog_agent_auth");
+  if (saved) {
+    try {
+      _auth = JSON.parse(saved);
+      const res = await fetch(API_BASE + "/auth/me", {
+        headers: { "Authorization": "Bearer " + _auth.token }
+      });
+      if (res.ok) {
+        const me = await res.json();
+        _auth.user_id = me.user_id;
+        _auth.name = me.name;
+        localStorage.setItem("blog_agent_auth", JSON.stringify(_auth));
+        showAppPanel();
+        return;
+      }
+    } catch (e) { /* fall through to login */ }
+  }
+  _auth = null;
+  showAuthPanel();
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  renderAuthMode();
+  initAuth();
+
+  const submitBtn = document.getElementById("auth-submit");
+  const toggleBtn = document.getElementById("auth-toggle");
+  const nameInput = document.getElementById("auth-name");
+  const passInput = document.getElementById("auth-password");
+
+  async function doAuth() {
+    const name = nameInput.value.trim();
+    const password = passInput.value;
+    if (!name) { setAuthError("Please enter your name."); return; }
+    if (password.length < 4) { setAuthError("Password must be at least 4 characters."); return; }
+    submitBtn.disabled = true;
+    try {
+      const path = _authMode === "login" ? "/auth/login" : "/auth/signup";
+      const user = await authApi(path, { name: name, password: password });
+      _auth = user;
+      localStorage.setItem("blog_agent_auth", JSON.stringify(_auth));
+      showAppPanel();
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      submitBtn.disabled = false;
+    }
+  }
+
+  submitBtn.addEventListener("click", doAuth);
+  nameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") doAuth(); });
+  passInput.addEventListener("keydown", function (e) { if (e.key === "Enter") doAuth(); });
+
+  toggleBtn.addEventListener("click", function () {
+    _authMode = _authMode === "login" ? "signup" : "login";
+    renderAuthMode();
+  });
+});
+
 function renderTracker(activeIndex, elapsed) {
   const tracker = document.getElementById("tracker");
   tracker.innerHTML = "";
@@ -308,7 +421,7 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
   try {
     const response = await fetch(`${API_BASE}/generate-1click-stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify(payload)
     });
 
@@ -316,6 +429,15 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
       stopTimer();
       renderTracker(-1);
       const errBody = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        if (_auth) {
+          _auth = null;
+          localStorage.removeItem("blog_agent_auth");
+          showAuthPanel();
+          setAuthError("Your session expired - please log in again.");
+        }
+        throw new Error("Unauthorized - please log in.");
+      }
       throw new Error(errBody.detail?.message || ("Request failed with status " + response.status));
     }
 
