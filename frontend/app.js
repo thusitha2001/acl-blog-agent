@@ -1,139 +1,47 @@
-﻿const STAGES = ["SERP", "Brief", "Scrape", "Draft", "SEO", "Validate"];
+﻿const STAGES = ["SERP", "Brief", "Draft", "SEO", "Validate"];
+const STAGES_WITH_SCRAPE = ["SERP", "Brief", "Scrape", "Draft", "SEO", "Validate"];
 
 const API_BASE = "";
 
 let _genTimer = null;
 
-let _auth = null; // { name, user_id, token } or null
-
 function authHeaders() {
-  if (_auth && _auth.token) {
-    return { "Content-Type": "application/json", "Authorization": "Bearer " + _auth.token };
-  }
   return { "Content-Type": "application/json" };
 }
 
-async function authApi(path, payload) {
-  const res = await fetch(API_BASE + path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data.detail && data.detail.message ? data.detail.message
-      : (data.message || ("Request failed with status " + res.status));
-    throw new Error(msg);
-  }
-  return data;
+function getStages() {
+  const website = document.getElementById("website")?.value?.trim() || "";
+  return website ? STAGES_WITH_SCRAPE : STAGES;
 }
-
-function showAuthPanel() {
-  document.getElementById("auth-panel").style.display = "flex";
-  document.getElementById("app-panel").style.display = "none";
-}
-
-function showAppPanel() {
-  document.getElementById("auth-panel").style.display = "none";
-  document.getElementById("app-panel").style.display = "flex";
-  document.getElementById("user-id").value = _auth ? _auth.user_id : "";
-}
-
-function setAuthError(msg) {
-  document.getElementById("auth-error").textContent = msg || "";
-}
-
-let _authMode = "login"; // "login" | "signup"
-
-function renderAuthMode() {
-  document.getElementById("auth-title").textContent =
-    _authMode === "login" ? "Log in" : "Create account";
-  document.getElementById("auth-sub").textContent =
-    _authMode === "login"
-      ? "Enter your account to continue."
-      : "Choose a name and password (min 4 chars).";
-  document.getElementById("auth-submit").textContent =
-    _authMode === "login" ? "Log in" : "Create account";
-  setAuthError("");
-}
-
-async function initAuth() {
-  const saved = localStorage.getItem("blog_agent_auth");
-  if (saved) {
-    try {
-      _auth = JSON.parse(saved);
-      const res = await fetch(API_BASE + "/auth/me", {
-        headers: { "Authorization": "Bearer " + _auth.token }
-      });
-      if (res.ok) {
-        const me = await res.json();
-        _auth.user_id = me.user_id;
-        _auth.name = me.name;
-        localStorage.setItem("blog_agent_auth", JSON.stringify(_auth));
-        showAppPanel();
-        return;
-      }
-    } catch (e) { /* fall through to login */ }
-  }
-  _auth = null;
-  showAuthPanel();
-}
-
-document.addEventListener("DOMContentLoaded", function () {
-  renderAuthMode();
-  initAuth();
-
-  const submitBtn = document.getElementById("auth-submit");
-  const toggleBtn = document.getElementById("auth-toggle");
-  const nameInput = document.getElementById("auth-name");
-  const passInput = document.getElementById("auth-password");
-
-  async function doAuth() {
-    const name = nameInput.value.trim();
-    const password = passInput.value;
-    if (!name) { setAuthError("Please enter your name."); return; }
-    if (password.length < 4) { setAuthError("Password must be at least 4 characters."); return; }
-    submitBtn.disabled = true;
-    try {
-      const path = _authMode === "login" ? "/auth/login" : "/auth/signup";
-      const user = await authApi(path, { name: name, password: password });
-      _auth = user;
-      localStorage.setItem("blog_agent_auth", JSON.stringify(_auth));
-      showAppPanel();
-    } catch (err) {
-      setAuthError(err.message);
-    } finally {
-      submitBtn.disabled = false;
-    }
-  }
-
-  submitBtn.addEventListener("click", doAuth);
-  nameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") doAuth(); });
-  passInput.addEventListener("keydown", function (e) { if (e.key === "Enter") doAuth(); });
-
-  toggleBtn.addEventListener("click", function () {
-    _authMode = _authMode === "login" ? "signup" : "login";
-    renderAuthMode();
-  });
-});
 
 function renderTracker(activeIndex, elapsed) {
   const tracker = document.getElementById("tracker");
+  const stages = getStages();
   tracker.innerHTML = "";
-  if (activeIndex >= 0 && activeIndex < STAGES.length && elapsed !== undefined) {
+  if (activeIndex >= 0 && activeIndex < stages.length && elapsed !== undefined) {
     const pct = Math.min(Math.round((elapsed / 180) * 100), 99);
-    tracker.innerHTML = '<div class="step active"><span class="dot"></span><span>' + STAGES[activeIndex] + '</span></div><span style="margin-left:10px;color:var(--teal);font-size:12px;">' + pct + '% - ' + elapsed + 's</span>';
-  } else if (activeIndex >= STAGES.length) {
-    tracker.innerHTML = '<div class="step done"><span class="dot"></span><span>Done!</span></div>';
-  } else {
-    tracker.innerHTML = "";
+    tracker.innerHTML = `
+      <div class="tracker-step active">
+        <span class="tracker-dot"></span>
+        <span class="tracker-label">${stages[activeIndex]}</span>
+      </div>
+      <span class="tracker-meta">${pct}% · ${elapsed}s</span>
+    `;
+  } else if (activeIndex >= stages.length) {
+    tracker.innerHTML = `
+      <div class="tracker-step done">
+        <span class="tracker-dot"></span>
+        <span class="tracker-label">Complete</span>
+      </div>
+    `;
   }
 }
 
 function startTimer() {
   let elapsed = 0;
   let stageIdx = 0;
-  const stageAt = [0, 5, 10, 20, 35, 50];
+  const stages = getStages();
+  const stageAt = [0, 5, 10, 20, 35, 50].slice(0, stages.length);
   renderTracker(0, elapsed);
   _genTimer = setInterval(() => {
     elapsed++;
@@ -150,13 +58,6 @@ function stopTimer() {
 
 renderTracker(-1);
 
-document.getElementById("keyword").addEventListener("input", function() {
-  const count = document.getElementById("keyword-count");
-  const len = this.value.length;
-  count.textContent = len;
-  count.className = len > 200 ? "char-count over" : "char-count";
-});
-
 function wordCountOf(str) {
   return str ? str.split(/\s+/).filter(Boolean).length : 0;
 }
@@ -168,8 +69,8 @@ function updateWordCountLabel(inputId, labelId, limit) {
     const label = document.getElementById(labelId);
     if (!label) return;
     const n = wordCountOf(el.value.trim());
-    label.textContent = n + "/" + limit + " words";
-    label.style.color = n > limit ? "var(--rust)" : "";
+    label.textContent = `${n}/${limit} words`;
+    label.classList.toggle("over", n > limit);
   };
   el.addEventListener("input", fn);
   fn();
@@ -179,35 +80,31 @@ updateWordCountLabel("instructions", "instructions-count", 150);
 updateWordCountLabel("hook-brief", "hook-brief-count", 30);
 updateWordCountLabel("bv-style", "bv-style-count", 60);
 
-// "How Blog Agent Works" guide modal
-const guideOverlay = document.getElementById("guide-overlay");
-function openGuide() { guideOverlay.classList.remove("hidden"); }
-function closeGuide() { guideOverlay.classList.add("hidden"); }
-document.getElementById("guide-btn").addEventListener("click", openGuide);
-document.getElementById("guide-close").addEventListener("click", closeGuide);
-guideOverlay.addEventListener("click", (e) => {
-  if (e.target === guideOverlay) closeGuide();
-});
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !guideOverlay.classList.contains("hidden")) closeGuide();
+document.getElementById("keyword").addEventListener("input", function() {
+  const count = document.getElementById("keyword-count");
+  const len = this.value.length;
+  count.textContent = len;
+  count.classList.toggle("over", len > 200);
 });
 
-document.querySelectorAll(".pill-toggle").forEach(pill => {
-  const checkbox = pill.querySelector("input[type=checkbox]");
-  if (checkbox.checked) pill.classList.add("active");
-  pill.addEventListener("click", (e) => {
+// Toggle chips
+document.querySelectorAll(".toggle-chip").forEach(chip => {
+  const checkbox = chip.querySelector("input[type=checkbox]");
+  if (checkbox.checked) chip.classList.add("active");
+  chip.addEventListener("click", (e) => {
     e.preventDefault();
     checkbox.checked = !checkbox.checked;
-    pill.classList.toggle("active", checkbox.checked);
+    chip.classList.toggle("active", checkbox.checked);
   });
 });
 
+// Brand voice editor
 document.getElementById("brand-voice-select").addEventListener("change", function() {
   const editor = document.getElementById("brand-voice-editor");
   if (this.value === "__create__") {
-    editor.classList.remove("collapsed");
+    editor.classList.remove("hidden");
   } else {
-    editor.classList.add("collapsed");
+    editor.classList.add("hidden");
   }
 });
 
@@ -235,21 +132,11 @@ function markdownToHtml(md) {
   let inParagraph = false;
   let inTable = false;
 
-  function closeParagraph() {
-    if (inParagraph) { html += "</p>"; inParagraph = false; }
-  }
-
-  function closeTable() {
-    if (inTable) { html += "</tbody></table>"; inTable = false; }
-  }
-
-  function parseRow(line) {
-    return line.split("|").slice(1, -1).map(c => c.trim());
-  }
-
-  function isSeparator(line) {
-    return /^\|[\s:-]+\|$/.test(line.trim());
-  }
+  function closeParagraph() { if (inParagraph) { html += "</p>"; inParagraph = false; } }
+  function closeTable() { if (inTable) { html += "</tbody></table>"; inTable = false; } }
+  function parseRow(line) { return line.split("|").slice(1, -1).map(c => c.trim()); }
+  function isSeparator(line) { return /^\|[\s:-]+\|$/.test(line.trim()); }
+  function applyInline(text) { return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>"); }
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -257,49 +144,33 @@ function markdownToHtml(md) {
     if (trimmed.startsWith("### ")) { closeParagraph(); closeTable(); html += "<h3>" + trimmed.slice(4) + "</h3>"; continue; }
     if (trimmed.startsWith("## ")) { closeParagraph(); closeTable(); html += "<h2>" + trimmed.slice(3) + "</h2>"; continue; }
     if (trimmed.startsWith("# ")) { closeParagraph(); closeTable(); html += "<h1>" + trimmed.slice(2) + "</h1>"; continue; }
-    if (trimmed.startsWith("- ")) {
-      closeParagraph(); closeTable();
-      html += "<p style='margin-left:16px'>- " + trimmed.slice(2) + "</p>";
-      continue;
-    }
-
-    if (trimmed.startsWith("> ")) {
-      closeParagraph(); closeTable();
-      html += "<blockquote>" + applyInline(trimmed.slice(2)) + "</blockquote>";
-      continue;
-    }
+    if (trimmed.startsWith("- ")) { closeParagraph(); closeTable(); html += "<p class='list-item'>- " + trimmed.slice(2) + "</p>"; continue; }
+    if (trimmed.startsWith("> ")) { closeParagraph(); closeTable(); html += "<blockquote>" + applyInline(trimmed.slice(2)) + "</blockquote>"; continue; }
     if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
       if (!inTable) {
         closeParagraph();
         const cells = parseRow(trimmed);
-        html += '<table style="border-collapse:collapse;width:100%;margin:12px 0;font-size:13px"><thead><tr>';
-        cells.forEach(c => { html += '<th style="border:1px solid #d2dbe4;padding:6px 10px;background:#f4f6f9;text-align:left">' + applyInline(c) + '</th>'; });
-        html += '</tr></thead><tbody>';
+        html += '<table><thead><tr>';
+        cells.forEach(c => { html += "<th>" + applyInline(c) + "</th>"; });
+        html += "</tr></thead><tbody>";
         inTable = true;
         continue;
       }
       if (isSeparator(trimmed)) continue;
       const cells = parseRow(trimmed);
-      html += '<tr>';
-      cells.forEach(c => { html += '<td style="border:1px solid #d2dbe4;padding:6px 10px">' + applyInline(c) + '</td>'; });
-      html += '</tr>';
+      html += "<tr>";
+      cells.forEach(c => { html += "<td>" + applyInline(c) + "</td>"; });
+      html += "</tr>";
       continue;
     }
-
     closeTable();
-    let processed = trimmed.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    processed = processed.replace(/\*(.+?)\*/g, "<em>$1</em>");
-
+    let processed = applyInline(trimmed);
     if (!inParagraph) { html += "<p>"; inParagraph = true; } else { html += " "; }
     html += processed;
   }
   closeParagraph();
   closeTable();
   return html;
-}
-
-function applyInline(text) {
-  return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>");
 }
 
 function renderOutput(result) {
@@ -309,81 +180,99 @@ function renderOutput(result) {
   const errors = validation.errors || [];
   const warnings = validation.warnings || [];
 
-  let badgeHtml = validation.passed
-    ? '<span class="badge pass">Validation passed</span>'
-    : '<span class="badge error">Validation failed</span>';
+  const badgeHtml = validation.passed
+    ? '<span class="badge badge-pass">Validation passed</span>'
+    : '<span class="badge badge-error">Validation failed</span>';
 
   let issuesHtml = "";
   if (errors.length || warnings.length) {
     issuesHtml = '<ul class="issue-list">';
-    errors.forEach(e => { issuesHtml += '<li><span class="marker error">ERR</span><span>' + e + '</span></li>'; });
-    warnings.forEach(w => { issuesHtml += '<li><span class="marker warn">WARN</span><span>' + w + '</span></li>'; });
+    errors.forEach(e => { issuesHtml += '<li><span class="issue-marker error">ERR</span><span>' + e + '</span></li>'; });
+    warnings.forEach(w => { issuesHtml += '<li><span class="issue-marker warn">WARN</span><span>' + w + '</span></li>'; });
     issuesHtml += '</ul>';
   } else {
-    issuesHtml = '<p style="font-size:13px; color: var(--ink-soft);">No errors or warnings.</p>';
+    issuesHtml = '<p class="no-issues">No errors or warnings.</p>';
   }
 
   const faqsHtml = (seo.faqs || []).map(f =>
-    '<div class="meta-card"><div class="label">FAQ</div><div class="value"><strong>' +
+    '<div class="meta-card"><div class="meta-label">FAQ</div><div class="meta-value"><strong>' +
     (f.question || "") + '</strong><br>' + (f.answer || "") + '</div></div>'
   ).join("");
 
   const issueRowsHtml = (seo.issues || []).map(i =>
-    '<li><span class="marker warn">' + (i.severity || "note").toUpperCase() + '</span><span><strong>' +
-    (i.issue_type || "") + '</strong> -- ' + (i.recommendation || "") + '</span></li>'
+    '<li><span class="issue-marker warn">' + (i.severity || "note").toUpperCase() + '</span><span><strong>' +
+    (i.issue_type || "") + '</strong> — ' + (i.recommendation || "") + '</span></li>'
   ).join("");
 
   const nlpKeywordsHtml = serp.nlp_keywords
-    ? '<div class="meta-card"><div class="label">NLP Keywords (from SERP)</div><div class="value mono">' +
+    ? '<div class="meta-card"><div class="meta-label">NLP Keywords (SERP)</div><div class="meta-value mono">' +
       serp.nlp_keywords.join(", ") + '</div></div>'
     : "";
 
   document.getElementById("output-body").innerHTML = `
-    <div class="stat-row">
-      <div class="stat-box"><div class="num">${validation.word_count ?? "--"}</div><div class="lbl">Words</div></div>
-      <div class="stat-box"><div class="num">${validation.h1_count ?? "--"}</div><div class="lbl">H1 count</div></div>
-      <div class="stat-box"><div class="num">${validation.keyword_count ?? "--"}</div><div class="lbl">Keyword hits</div></div>
-      <div class="stat-box"><div class="num">${errors.length}</div><div class="lbl">Errors</div></div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-value">${validation.word_count ?? "—"}</div><div class="stat-label">Words</div></div>
+      <div class="stat-card"><div class="stat-value">${validation.h1_count ?? "—"}</div><div class="stat-label">H1 Count</div></div>
+      <div class="stat-card"><div class="stat-value">${validation.keyword_count ?? "—"}</div><div class="stat-label">Keyword Hits</div></div>
+      <div class="stat-card"><div class="stat-value">${errors.length}</div><div class="stat-label">Errors</div></div>
     </div>
-    <div style="margin-bottom: 16px;">${badgeHtml}</div>
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="article">Article</button>
-      <button class="tab-btn" data-tab="seo">SEO</button>
-      <button class="tab-btn" data-tab="serp">SERP</button>
-      <button class="tab-btn" data-tab="validation">Validation</button>
+    <div class="badge-row">${badgeHtml}</div>
+    <div class="tabs" role="tablist">
+      <button class="tab-btn active" role="tab" data-tab="article" aria-selected="true">Article</button>
+      <button class="tab-btn" role="tab" data-tab="seo" aria-selected="false">SEO</button>
+      <button class="tab-btn" role="tab" data-tab="serp" aria-selected="false">SERP</button>
+      <button class="tab-btn" role="tab" data-tab="validation" aria-selected="false">Validation</button>
     </div>
-    <div class="tab-content active" id="tab-article">
+    <div class="tab-panel active" id="tab-article" role="tabpanel">
       <div class="article-body">${markdownToHtml(result.article || "")}</div>
     </div>
-    <div class="tab-content" id="tab-seo">
-      <div class="meta-card"><div class="label">Meta title</div><div class="value">${seo.meta_title || "--"}</div></div>
-      <div class="meta-card"><div class="label">Meta description</div><div class="value">${seo.meta_description || "--"}</div></div>
-      <div class="meta-card"><div class="label">Secondary keywords</div><div class="value mono">${(seo.secondary_keywords || []).join(", ") || "--"}</div></div>
+    <div class="tab-panel" id="tab-seo" role="tabpanel">
+      <div class="meta-card"><div class="meta-label">Meta Title</div><div class="meta-value">${seo.meta_title || "—"}</div></div>
+      <div class="meta-card"><div class="meta-label">Meta Description</div><div class="meta-value">${seo.meta_description || "—"}</div></div>
+      <div class="meta-card"><div class="meta-label">Secondary Keywords</div><div class="meta-value mono">${(seo.secondary_keywords || []).join(", ") || "—"}</div></div>
       ${faqsHtml}
-      ${issueRowsHtml ? '<div class="meta-card"><div class="label">SEO recommendations</div><ul class="issue-list">' + issueRowsHtml + '</ul></div>' : ""}
+      ${issueRowsHtml ? '<div class="meta-card"><div class="meta-label">SEO Recommendations</div><ul class="issue-list">' + issueRowsHtml + '</ul></div>' : ""}
     </div>
-    <div class="tab-content" id="tab-serp">
-      <div class="meta-card"><div class="label">Keyword analyzed</div><div class="value">${serp.keyword || "--"}</div></div>
-      <div class="meta-card"><div class="label">Competitor results</div><div class="value">${serp.results_count || 0} pages analyzed</div></div>
+    <div class="tab-panel" id="tab-serp" role="tabpanel">
+      <div class="meta-card"><div class="meta-label">Keyword Analyzed</div><div class="meta-value">${serp.keyword || "—"}</div></div>
+      <div class="meta-card"><div class="meta-label">Competitor Results</div><div class="meta-value">${serp.results_count || 0} pages analyzed</div></div>
       ${nlpKeywordsHtml}
-      <div class="meta-card"><div class="label">Related queries</div><div class="value">${(serp.related_queries || []).join("<br>") || "--"}</div></div>
+      <div class="meta-card"><div class="meta-label">Related Queries</div><div class="meta-value">${(serp.related_queries || []).join("<br>") || "—"}</div></div>
     </div>
-    <div class="tab-content" id="tab-validation">
+    <div class="tab-panel" id="tab-validation" role="tabpanel">
       ${issuesHtml}
     </div>
   `;
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-      document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+      document.querySelectorAll(".tab-btn").forEach(b => {
+        b.classList.remove("active");
+        b.setAttribute("aria-selected", "false");
+      });
+      document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       btn.classList.add("active");
+      btn.setAttribute("aria-selected", "true");
       document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
     });
   });
 }
 
-// Panel Resize Divider
+function updateStreamTracker(activeIndex, status, message) {
+  const tracker = document.getElementById("tracker");
+  const stages = getStages();
+  const stageName = stages[activeIndex] || "";
+  const isDone = status === "done";
+  tracker.innerHTML = `
+    <div class="tracker-step ${isDone ? "done" : "active"}">
+      <span class="tracker-dot"></span>
+      <span class="tracker-label">${stageName}</span>
+    </div>
+    ${message ? '<div class="tracker-msg ' + (isDone ? "done" : "") + '">' + (isDone ? "✓ " : "⏳ ") + message + '</div>' : ""}
+  `;
+}
+
+// Panel resize
 (function() {
   const divider = document.getElementById("panel-divider");
   const panel = divider.previousElementSibling;
@@ -402,8 +291,8 @@ function renderOutput(result) {
     const layout = divider.parentElement;
     const rect = layout.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const min = 300;
-    const max = Math.floor(rect.width * 0.5);
+    const min = 320;
+    const max = Math.floor(rect.width * 0.6);
     const clamped = Math.max(min, Math.min(max, x));
     panel.style.width = clamped + "px";
   });
@@ -415,12 +304,31 @@ function renderOutput(result) {
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
   });
+
+  divider.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      divider.click();
+    }
+  });
 })();
 
+// Guide modal
+const guideOverlay = document.getElementById("guide-overlay");
+function openGuide() { guideOverlay.classList.remove("hidden"); }
+function closeGuide() { guideOverlay.classList.add("hidden"); }
+document.getElementById("guide-trigger")?.addEventListener("click", openGuide);
+document.querySelector(".guide-close")?.addEventListener("click", closeGuide);
+guideOverlay?.addEventListener("click", (e) => { if (e.target === guideOverlay) closeGuide(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !guideOverlay?.classList.contains("hidden")) closeGuide(); });
+
+// Form submit
 document.getElementById("brief-form").addEventListener("submit", async (e) => {
   e.preventDefault();
 
   const btn = document.getElementById("generate-btn");
+  const btnContent = btn.querySelector(".btn-content");
+  const btnLoader = btn.querySelector(".btn-loader");
 
   // Client-side validation
   const instructionsVal = document.getElementById("instructions").value.trim();
@@ -430,32 +338,26 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
 
   const wordCount = (s) => s ? s.split(/\s+/).filter(Boolean).length : 0;
 
-  if (wordCount(instructionsVal) > 150) {
-    alert("Additional Instructions is limited to 150 words.");
-    return;
-  }
-  if (wordCount(hookBriefVal) > 30) {
-    alert("Hook Brief is limited to 30 words.");
-    return;
-  }
-  if (wordCount(brandVoiceVal) > 100) {
-    alert("Brand Voice is limited to 100 words.");
-    return;
-  }
+  if (wordCount(instructionsVal) > 150) { alert("Additional Instructions limited to 150 words."); return; }
+  if (wordCount(hookBriefVal) > 30) { alert("Hook Brief limited to 30 words."); return; }
+  if (wordCount(brandVoiceVal) > 100) { alert("Brand Voice limited to 100 words."); return; }
   if (targetWordsVal !== "") {
     const n = parseInt(targetWordsVal, 10);
-    if (isNaN(n) || n < 300 || n > 8000) {
-      alert("Target Words must be between 300 and 8000.");
-      return;
-    }
+    if (isNaN(n) || n < 300 || n > 8000) { alert("Target Words must be 300–8000."); return; }
   }
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Analyzing SERP & generating...';
+  btnContent.classList.add("hidden");
+  btnLoader.classList.remove("hidden");
 
   startTimer();
-  document.getElementById("output-body").innerHTML =
-    '<div class="empty-state">Analyzing competitors, generating brief, and writing article. This takes 1-3 minutes.</div>';
+  document.getElementById("output-body").innerHTML = `
+    <div class="empty-state generating">
+      <div class="spinner-ring"></div>
+      <h3>Generating article…</h3>
+      <p>Analyzing competitors, creating brief, and writing. This takes 1–3 minutes.</p>
+    </div>
+  `;
 
   const payload = {
     keyword: document.getElementById("keyword").value.trim(),
@@ -469,7 +371,6 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
     brand_voice: buildBrandVoice(),
     language: document.getElementById("language").value,
     brand_name: document.getElementById("brand-name").value.trim() || null,
-    user_id: document.getElementById("user-id").value.trim() || null,
     website: document.getElementById("website").value.trim() || null,
     include_faq: document.getElementById("include-faq").checked,
     include_takeaways: document.getElementById("include-takeaways").checked,
@@ -478,6 +379,8 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
     include_h3: document.getElementById("include-h3").checked,
     include_lists: document.getElementById("include-lists").checked,
     include_quotes: document.getElementById("include-quotes").checked,
+    include_italics: document.getElementById("include-italics").checked,
+    include_bold: document.getElementById("include-bold").checked,
     hook_type: document.getElementById("hook").value,
     hook_brief: document.getElementById("hook-brief").value.trim() || null,
     additional_instructions: document.getElementById("instructions").value.trim(),
@@ -494,32 +397,23 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
       stopTimer();
       renderTracker(-1);
       const errBody = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        if (_auth) {
-          _auth = null;
-          localStorage.removeItem("blog_agent_auth");
-          showAuthPanel();
-          setAuthError("Your session expired - please log in again.");
-        }
-        throw new Error("Unauthorized - please log in.");
-      }
       throw new Error(errBody.detail?.message || ("Request failed with status " + response.status));
     }
 
-    // Read the SSE stream and update progress live
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result = null;
 
-    const stageIndex = { serp: 0, brief: 1, scrape: 2, draft: 3, seo: 4, validate: 5 };
+    const stages = getStages();
+    const stageIndex = {};
+    stages.forEach((stage, i) => { stageIndex[stage.toLowerCase()] = i; });
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE events are separated by a blank line
       const events = buffer.split("\n\n");
       buffer = events.pop();
 
@@ -538,9 +432,7 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
         if (eventName === "stage") {
           const st = data.stage || "";
           const idx = stageIndex[st];
-          if (idx !== undefined) {
-            updateStreamTracker(idx, data.status, data.message);
-          }
+          if (idx !== undefined) updateStreamTracker(idx, data.status, data.message);
         } else if (eventName === "result") {
           result = data;
         } else if (eventName === "error") {
@@ -551,30 +443,19 @@ document.getElementById("brief-form").addEventListener("submit", async (e) => {
 
     stopTimer();
 
-    if (!result) {
-      throw new Error("No result received from server");
-    }
+    if (!result) throw new Error("No result received from server");
 
-    renderTracker(STAGES.length);
+    renderTracker(getStages().length);
     renderOutput(result);
 
   } catch (err) {
     stopTimer();
     renderTracker(-1);
     document.getElementById("output-body").innerHTML =
-      '<div class="error-banner">Generation failed: ' + err.message + '</div>';
+      '<div class="error-banner"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg><span>Generation failed: ' + err.message + '</span></div>';
   } finally {
     btn.disabled = false;
-    btn.textContent = "Generate Article";
+    btnContent.classList.remove("hidden");
+    btnLoader.classList.add("hidden");
   }
 });
-
-function updateStreamTracker(activeIndex, status, message) {
-  const tracker = document.getElementById("tracker");
-  tracker.innerHTML = "";
-  const stageName = STAGES[activeIndex];
-  const isDone = status === "done";
-  tracker.innerHTML =
-    '<div class="step ' + (isDone ? "done" : "active") + '"><span class="dot"></span><span>' + stageName + '</span></div>' +
-    (message ? '<div class="stream-msg">' + (isDone ? "✓ " : "⏳ ") + message + '</div>' : "");
-}

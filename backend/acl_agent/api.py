@@ -214,6 +214,10 @@ class OneClickRequest(BaseModel):
         max_length=1000,
         description="Additional instructions (max 150 words)",
     )
+    hook_type: str = Field(
+        default="question",
+        description="Hook type: question, statistic, fact, anecdote",
+    )
     hook_brief: Optional[str] = Field(
         default=None,
         max_length=200,
@@ -320,7 +324,6 @@ def auth_me(user: dict = Depends(require_auth)):
 @app.post("/generate-1click")
 def generate_1click_endpoint(
     request: OneClickRequest,
-    user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
 
@@ -338,7 +341,7 @@ def generate_1click_endpoint(
             language=request.language,
             brand_name=request.brand_name,
             website=request.website,
-            user_id=user["user_id"],
+            user_id=None,
             include_faq=request.include_faq,
             include_takeaways=request.include_takeaways,
             include_conclusion=request.include_conclusion,
@@ -356,7 +359,6 @@ def generate_1click_endpoint(
         )
 
         result["request_id"] = request_id
-        result["user_id"] = user["user_id"]
         return result
 
     except Exception as error:
@@ -376,7 +378,6 @@ def generate_1click_endpoint(
 @app.post("/generate-1click-stream")
 async def generate_1click_stream_endpoint(
     request: OneClickRequest,
-    user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
     queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
@@ -388,7 +389,6 @@ async def generate_1click_stream_endpoint(
 
         def emit(event_type: str, data: dict) -> None:
             data["request_id"] = request_id
-            data["user_id"] = user["user_id"]
             asyncio.run_coroutine_threadsafe(
                 queue.put((event_type, data)),
                 worker_loop,
@@ -413,7 +413,7 @@ async def generate_1click_stream_endpoint(
                     language=request.language,
                     brand_name=request.brand_name,
                     website=request.website,
-                    user_id=user["user_id"],
+                    user_id=None,
                     include_faq=request.include_faq,
                     include_takeaways=request.include_takeaways,
                     include_conclusion=request.include_conclusion,
@@ -437,7 +437,6 @@ async def generate_1click_stream_endpoint(
                     await queue.put(("error", {
                         "message": str(error),
                         "request_id": request_id,
-                        "user_id": user["user_id"],
                     }))
                 else:
                     await queue.put(("result", result))

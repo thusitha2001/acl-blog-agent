@@ -53,7 +53,7 @@ def parse_json_object(text: str) -> dict[str, Any]:
     )
 
     try:
-        return json.loads(cleaned)
+        return json.loads(cleaned, strict=False)
     except json.JSONDecodeError:
         pass
 
@@ -68,20 +68,20 @@ def parse_json_object(text: str) -> dict[str, Any]:
     candidate = cleaned[start:end + 1]
 
     try:
-        return json.loads(candidate)
+        return json.loads(candidate, strict=False)
     except json.JSONDecodeError:
         pass
 
     repaired = _repair_json(candidate)
     try:
-        return json.loads(repaired)
+        return json.loads(repaired, strict=False)
     except json.JSONDecodeError:
         pass
 
     for i in range(len(repaired) - 1, 0, -1):
         if repaired[i] == "}":
             try:
-                return json.loads(repaired[:i + 1])
+                return json.loads(repaired[:i + 1], strict=False)
             except json.JSONDecodeError:
                 continue
 

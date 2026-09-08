@@ -240,7 +240,7 @@ ORIGINALITY - NON-NEGOTIABLE
 - The article must read as original work a human editor would
   recognize as new, not a rewrite of existing material.
 
-STRUCTURE - REQUIRED
+'''STRUCTURE - REQUIRED
 - Exactly one H1 (the article title), using Markdown "# ".
 - 4-8 H2 sections using Markdown "## ", each covering one required
   topic or a distinct angle on the primary keyword.
@@ -294,7 +294,7 @@ FACT VERIFICATION — REQUIRED
   Z country," or specific numerical claims unless they appear in
   the VERIFIED FACTS source material.
 - When in doubt about any factual claim, omit it rather than
-  fabricate it.
+  fabricate it.'''
 
 LENGTH - REQUIRED, STRICT
 - The user's target word count for this article is EXACTLY
@@ -467,8 +467,8 @@ schema.
         prompt,
         SingleCallArticle,
         temperature=0.65,
-        max_tokens=9000,
-        schema_retries=0,
+        max_tokens=16000,
+        schema_retries=1,
         extra_validate=extra_validate,
     )
 
