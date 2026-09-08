@@ -135,7 +135,7 @@ function markdownToHtml(md) {
   function closeParagraph() { if (inParagraph) { html += "</p>"; inParagraph = false; } }
   function closeTable() { if (inTable) { html += "</tbody></table>"; inTable = false; } }
   function parseRow(line) { return line.split("|").slice(1, -1).map(c => c.trim()); }
-  function isSeparator(line) { return /^\|[\s:-]+\|$/.test(line.trim()); }
+  function isSeparator(line) { return /^\|(?:[\s:-]+\|)+$/.test(line.trim()); }
   function applyInline(text) { return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>"); }
 
   for (const line of lines) {

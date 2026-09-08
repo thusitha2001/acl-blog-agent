@@ -145,13 +145,18 @@ def call_model_for_json(
 
             current_user_prompt = (
                 user_prompt
-                + "\n\nYour previous response did not match the "
-                "required JSON schema. Here are the validation "
-                f"errors:\n{error}\n\n"
-                "Return ONLY corrected valid JSON matching the exact "
-                "field names shown in the example above. Do not "
-                "wrap it in an outer key. Do not add commentary, "
-                "markdown fences, or explanation - JSON only."
+                + "\n\n--- YOUR PREVIOUS RESPONSE (START) ---\n"
+                + raw
+                + "\n--- YOUR PREVIOUS RESPONSE (END) ---\n\n"
+                "That response did not match the required JSON "
+                "schema. Here are the validation errors:\n"
+                f"{error}\n\n"
+                "Fix that draft's structure - keep its content, "
+                "correct only the schema problems. Return ONLY "
+                "corrected valid JSON matching the exact field names "
+                "shown in the example above. Do not wrap it in an "
+                "outer key. Do not add commentary, markdown fences, "
+                "or explanation - JSON only."
             )
             continue
 
@@ -170,10 +175,17 @@ def call_model_for_json(
 
                 current_user_prompt = (
                     user_prompt
-                    + f"\n\nYour previous response had an issue: "
-                    f"{issue}\n\nReturn a corrected, complete JSON "
-                    "response fixing this issue, in the same schema "
-                    "as before. JSON only, no commentary."
+                    + "\n\n--- YOUR PREVIOUS RESPONSE (START) ---\n"
+                    + raw
+                    + "\n--- YOUR PREVIOUS RESPONSE (END) ---\n\n"
+                    f"That response had an issue: {issue}\n\n"
+                    "Revise THAT draft to fix the issue - expand, "
+                    "trim, or add the missing elements directly into "
+                    "the existing sections - while keeping everything "
+                    "that was already correct about it. Do not start "
+                    "over from scratch. Return the complete corrected "
+                    "JSON, in the same schema as before. JSON only, "
+                    "no commentary."
                 )
                 continue
 
@@ -200,6 +212,12 @@ def is_retryable_error(error: Exception) -> bool:
         "503",
         "502",
         "504",
+        # HF Inference Providers can return a bare, detail-free 400
+        # when the router lands a request on a provider that's at
+        # capacity (common under concurrent multi-user load) rather
+        # than a clean 429 - worth one retry before giving up.
+        "bad request",
+        "400",
     ]
 
     return any(

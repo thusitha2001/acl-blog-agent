@@ -219,8 +219,8 @@ body::after {
 }
 
 .panel-input {
-  width: 420px;
-  min-width: 320px;
+  width: 500px;
+  min-width: 500px;
   max-width: 50vw;
   flex-shrink: 0;
   background: linear-gradient(180deg, rgba(255, 242, 232, 0.86), rgba(237, 251, 250, 0.72));
@@ -649,6 +649,10 @@ textarea { resize: vertical; min-height: 56px; line-height: 1.5; }
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+
+.btn-submit-icon {
+  flex-shrink: 0;
 }
 
 .btn-loader {

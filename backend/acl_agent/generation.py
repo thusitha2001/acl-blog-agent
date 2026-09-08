@@ -23,6 +23,7 @@ from acl_agent.models import (
 from acl_agent.validation import (
     check_originality,
     count_h1,
+    humanization_checks,
     keyword_count,
     word_count,
     word_count_band,
@@ -372,17 +373,71 @@ schema.
                 "(a single line starting with '# ')"
             )
 
-        # Heading hierarchy — no H3 unless explicitly requested
-        instructions_lower = brief.additional_instructions.lower()
-        h3_allowed = "h3" in instructions_lower or "###" in instructions_lower
+        # Word count — min_words/max_words were computed and put in
+        # the prompt as a "hard, strict" requirement but never actually
+        # checked here, so the model's word count could drift with no
+        # retry. Enforce it (with schema_retries=2 giving it room to
+        # correct) so the returned article's length actually matches
+        # what the user asked for.
+        if count < minimum_words:
+            issues.append(
+                f"the article body is {count} words, below the "
+                f"required minimum of {minimum_words} (target is "
+                f"{brief.target_word_count}). Expand it - add more "
+                f"depth, examples, or detail to existing sections "
+                f"rather than padding with filler."
+            )
+        elif count > maximum_words:
+            issues.append(
+                f"the article body is {count} words, above the "
+                f"required maximum of {maximum_words} (target is "
+                f"{brief.target_word_count}). Trim it down without "
+                f"losing key information."
+            )
 
-        if not h3_allowed:
-            h3_matches = re.findall(r"^###\s+.+$", article, flags=re.MULTILINE)
+        # Heading hierarchy — H3 only when the user asked for it, and
+        # (just as important) actually present when they did ask -
+        # the brief's include_h3/include_tables/include_lists flags
+        # come straight from the request, not the model's own output.
+        h3_matches = re.findall(r"^###\s+.+$", article, flags=re.MULTILINE)
+
+        if not brief.include_h3:
             if h3_matches:
                 return (
                     "H3 subheadings (###) are not allowed in this "
                     "article. Use only H2 (##) sections. Remove "
                     "all H3 headings."
+                )
+        elif not h3_matches:
+            issues.append(
+                "the user requested H3 subheadings but the article "
+                "has none. Add H3 (###) subheadings nested under at "
+                "least some of the H2 sections."
+            )
+
+        if brief.include_tables:
+            has_table = bool(re.search(
+                r"\|[\s:-]*-{2,}[\s:-]*\|", article
+            ))
+            if not has_table:
+                issues.append(
+                    "the user requested at least one comparison "
+                    "table but the article has none. Add a Markdown "
+                    "table (| col1 | col2 | header row, then a "
+                    "|---|---| separator row) in the most relevant "
+                    "section."
+                )
+
+        if brief.include_lists:
+            has_list = bool(re.search(
+                r"^\s*(?:[-*]|\d+\.)\s+\S", article, flags=re.MULTILINE
+            ))
+            if not has_list:
+                issues.append(
+                    "the user requested bulleted/numbered lists but "
+                    "the article has none. Add at least one Markdown "
+                    "list ('- item' or '1. item') where it aids "
+                    "scannability."
                 )
 
         # Markdown rendering — lists must use - or *, tables use |
@@ -421,11 +476,17 @@ schema.
                     )
                     break
 
-        # Fact verification — flag suspicious unsupported claims
-        fact_keywords = ["historically", "ancient", "since", "costs",
-                         "cost$", "worth", "price", "priced at", "rare",
-                         "rarity", "limited edition", "mined", "mining",
-                         "invented", "discovered", "first", "oldest",
+        # Fact verification — flag suspicious unsupported claims.
+        # Deliberately limited to words that reliably signal an actual
+        # historical/factual assertion. Generic words like "price",
+        # "since", "first", "rare", or "worth" used to be in this list,
+        # but they're so common in ordinary prose (any e-commerce or
+        # jewelry article will say "price" repeatedly) that they flagged
+        # nearly every article as an "unsupported claim" regardless of
+        # whether it actually asserted anything - burning the one retry
+        # and then failing generation outright.
+        fact_keywords = ["historically", "ancient", "limited edition",
+                         "mined", "mining", "invented", "discovered",
                          "million years", "billion"]
         article_lower = article.lower()
         for kw_fact in fact_keywords:
@@ -439,6 +500,29 @@ schema.
                     f"material. Remove or verify this claim."
                 )
                 break
+
+        # Humanization — the HUMANIZATION_VOICE prompt block asks for
+        # contractions, varied rhythm, depth signals, em dashes, etc.,
+        # but until now nothing ever checked whether the model actually
+        # did any of it (humanization_checks() existed but was only
+        # wired into the post-hoc report, never the retry loop) - so
+        # it was the one instruction block with zero consequence for
+        # ignoring it. Only reject on a strong multi-signal "reads
+        # like AI" pattern (3+ simultaneous failures) rather than any
+        # single metric, since this already competes with several
+        # other hard constraints for the model's attention within a
+        # few retries.
+        humanization = humanization_checks(article)
+        if len(humanization["warnings"]) >= 3:
+            issues.append(
+                "the writing reads too AI-generated/robotic ("
+                + " ".join(humanization["warnings"])
+                + "). Rewrite with natural contractions, varied "
+                "sentence lengths, at least one em dash or "
+                "parenthetical aside, and one honest depth signal "
+                "(an acknowledged trade-off or uncertainty) - without "
+                "changing the facts or structure."
+            )
 
         if issues:
             return "; ".join(issues)
@@ -457,6 +541,15 @@ schema.
 
         return None
 
+    # Scale the output token budget to what this article actually
+    # needs instead of always asking for the max. A flat 16000-token
+    # request for a 600-word article is wasteful, and some HF Inference
+    # Providers backing the model enforce their own (lower) max_tokens
+    # cap - when the router load-balances onto one of those under
+    # concurrent traffic, an oversized request gets rejected outright
+    # with a 400 rather than throttled.
+    max_tokens = max(3000, min(16000, brief.target_word_count * 2 + 1200))
+
     return call_model_for_json(
         single_call_system_prompt(
             brief.brand_name,
@@ -467,8 +560,12 @@ schema.
         prompt,
         SingleCallArticle,
         temperature=0.65,
-        max_tokens=16000,
-        schema_retries=1,
+        max_tokens=max_tokens,
+        # 3 retries (4 attempts total): extra_validate now stacks
+        # several hard requirements at once (word count band, H3s,
+        # tables, lists all have to pass together), so it needs more
+        # room to converge than the single retry originally allowed.
+        schema_retries=3,
         extra_validate=extra_validate,
     )
 

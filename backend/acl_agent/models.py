@@ -69,8 +69,8 @@ class ContentBrief(BaseModel):
     )
     target_word_count: int = Field(
         default=1500,
-        ge=600,
-        le=5000,
+        ge=300,
+        le=8000,
     )
     secondary_keywords: list[KeywordTarget] = Field(
         default_factory=list,
@@ -88,6 +88,18 @@ class ContentBrief(BaseModel):
         default_factory=list,
     )
     additional_instructions: str = ""
+
+    # Structure/formatting toggles the user picked at request time.
+    # Set programmatically after the brief LLM call (never trusted
+    # from the model's own output) so extra_validate() can check
+    # deterministically whether the article actually honored them,
+    # instead of re-parsing additional_instructions text.
+    include_h3: bool = True
+    include_tables: bool = False
+    include_lists: bool = True
+    include_quotes: bool = False
+    include_italics: bool = False
+    include_bold: bool = True
 
 
 class OutlineSection(BaseModel):

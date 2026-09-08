@@ -688,6 +688,18 @@ Generate the complete content brief as a single JSON object.
     brief.website = website
     brief.primary_keyword = keyword
 
+    # Structure/formatting flags come from the request, never the
+    # brief LLM call - generate_single_call_article's extra_validate
+    # checks these to confirm the article actually included what the
+    # user asked for (H3s, tables, lists), not just that the model
+    # said it would.
+    brief.include_h3 = include_h3
+    brief.include_tables = include_tables
+    brief.include_lists = include_lists
+    brief.include_quotes = include_quotes
+    brief.include_italics = include_italics
+    brief.include_bold = include_bold
+
     # Use LLM-generated title if user didn't provide one
     if not title and brief.title:
         logger.info(
