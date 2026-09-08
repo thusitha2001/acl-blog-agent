@@ -1,8 +1,8 @@
 # Memory / Session Log — ACL Blog Agent
 
 This file captures the full state, decisions, and history of the ACL Blog Agent
-project as of this session. It is the single source of truth for the current
-state of the codebase, the work completed, known issues, and next steps.
+project. It is the single source of truth for the current state of the codebase,
+the work completed, known issues, and next steps.
 
 ---
 
@@ -23,183 +23,75 @@ A SEO blog article generator ("ACL Blog Agent") built with FastAPI:
 - Structure: root holds `.env`, `frontend/`, `backend/`. Backend serves the
   frontend and the API on a single port **8001**.
 - `frontend/app.js` uses `API_BASE = ""` (relative paths) → ngrok-friendly.
-- Backend model: `zai-org/GLM-4.6` on the Hugging Face free inference API
-  (fallback: `meta-llama/Llama-3.1-8B-Instruct`).
+- Backend model: `meta-llama/Llama-3.1-8B-Instruct` on HuggingFace free
+  inference API (fallback: same model if primary fails).
 - Deployed publicly via **ngrok**.
 - Hosted on **GitHub** (private repo — see section 8).
 
 ---
 
-## 2. FAQ / Direct Answers (this session)
+## 2. Features
 
-### Does a new URL trigger a fresh web scrape each time? Where is it stored?
-- **Previously:** No. Scraping only happened via the manual `ingest` command;
-  generation just read the pre-built index.
-- **Now (implemented):** Yes — if a user submits a URL in the **Website**
-  field on a generation request, it is scraped fresh at request time.
-- **Persistent knowledge base:** lives in `backend/data/`
-  (`knowledge.index`, `bm25_index.pkl`, `knowledge_chunks.json`,
-  `ingestion_manifest.json`) — built once via `ingest`, reused for all
-  requests.
-- **Request-time scrapes:** go only to **memory for that single request** —
-  never written to `data/`, never merged into the global index.
-- **Storage summary:** pre-ingested content is **permanent**; user-submitted
-  URLs are **temporary** (used for that one article, then discarded).
-
-### Why is the login not showing?
-- There was **no login feature** originally — the app went straight to the
-  generation form. Simple user accounts (signup/login) were subsequently
-  implemented (feature below).
+1. **One-click generation** from a keyword (or full custom brief).
+2. **No auth required** — generation endpoints are open (auth endpoints
+   exist but are unused by the frontend).
+3. **Custom target word count** (300–8000) that overrides preset sizes.
+4. **Word limits** on Additional Instructions (150), Hook Brief (30), and
+   Brand Voice (100), with live UI counters.
+5. **Request-time scraping** of a user-provided website (in-memory only).
+6. **SSE streaming** with 15-second keepalives (survives proxies like ngrok).
+7. **"How Blog Agent Works" guide** modal.
+8. **Dynamic progress tracker** — shows 5 stages normally, 6 when website
+   URL is provided (adds "Scrape" stage).
+9. **Custom brand voice** editor (tone, vocabulary, style notes, avoid list).
+10. **Structure toggle chips** — tables, H3, lists, quotes, italics, bold.
+11. Built-in **fact verification**, **heading-hierarchy** control, **Markdown**
+    correctness, and **repetition** checks.
 
 ---
 
-## 3. Features Added in This Session (in order)
+## 3. Recent Changes (this session)
 
-1. **5 quality-improvement fixes** (see section 4).
-2. **SSE keepalive** — ping every 15 s of silence to prevent ngrok/browser
-   connection drops.
-3. **Request-time auto-scrape** — scrape user-provided URLs fresh per request
-   (in-memory only).
-4. **`user_id` tracking** — optional user identifier on every request.
-5. **Simple user accounts** (signup/login), protecting the API.
-6. **Word limits** on Additional Instructions / Hook Brief / Brand Voice.
-7. **Custom target words** (300–8000) overriding preset article sizes.
-8. **"How Blog Agent Works" guide** modal.
+### Frontend redesign
+- Complete UI overhaul: new `app-shell` → `header` → `layout-grid` (input
+  panel | resizable divider | output panel) → `footer`.
+- Form organized into labeled sections: Content, Writing Settings, Structure,
+  Hook, Brand, Additional Instructions.
+- New toggle chip buttons for formatting options (Tables, H3, Lists, Quotes,
+  Italics, Bold).
+- Switch toggles for FAQ, Takeaways, Conclusion.
+- Brand voice editor with tone, vocabulary, style notes, and avoid fields.
+- Guide modal explaining the 6-step pipeline.
+- Dynamic progress tracker (5 or 6 stages based on website URL).
+- Resizable input/output panels via drag divider.
+- Fonts: Space Grotesk (display), DM Sans (body), JetBrains Mono (mono).
+- Warm ivory + teal/rust/amber color palette with gradient backgrounds.
 
----
+### Auth removal
+- Removed `Depends(require_auth)` from `/generate-1click` and
+  `/generate-1click-stream` in `api.py`.
+- Removed `user_id` from generation payloads (set to `None`).
+- Auth endpoints (`/auth/signup`, `/auth/login`, `/auth/me`) still exist
+  but are unused by the frontend.
+- Removed all auth UI, token handling, and login/signup logic from frontend.
 
-## 4. The 5 Quality FIXES Implemented
+### Model switch
+- `.env` `MODEL` changed from `zai-org/GLM-4.6` to
+  `meta-llama/Llama-3.1-8B-Instruct`.
+- Reason: smaller model = faster generation on HF free tier.
 
-| # | Fix | Where | What it does |
-|---|-----|-------|--------------|
-| 1 | **Prevent hallucinated internal links** | `auto_brief.py` prompt | Only use URLs from the brand website (`BRAND_SITE`); return `[]` if none found. |
-| 2 | **Fix Markdown rendering** | `generation.py` system prompt + `extra_validate` | Lists MUST use `-`/`*`, tables MUST use `\|` pipe syntax. HTML tags rejected. |
-| 3 | **Heading hierarchy** | `generation.py` system prompt + `extra_validate` | H3 (`###`) forbidden unless H3 is explicitly requested in `additional_instructions`. |
-| 4 | **Fact verification** | `generation.py` system prompt + `extra_validate` | Blocks unsupported historical/pricing/rarity/mining claims; only facts in VERIFIED FACTS/product_facts allowed. |
-| 5 | **Reduce repetition** | `generation.py` `extra_validate` | Flags keyword appearing too often in a single section (limit = 3 + 1 per 40 section words). |
-
-Plus an **SSE keepalive** in `api.py`: sends `: keepalive\n\n` every 15 s of
-silence to keep long generations from dropping through ngrok.
-
----
-
-## 5. Request-Time Auto-Scrape (feature)
-
-| File | Change |
-|------|--------|
-| `scraping.py` | New `scrape_url_for_request(url)`: fresh in-memory scrape of the user URL; follows up to 2 `/blogs/` links; returns concatenated content or `""`. |
-| `pipeline_1click.py` | `generate_full_pipeline()` accepts `extra_style_context` / `extra_fact_context` (prepended to KB retrieval). `generate_1click()` scrapes when `website` is explicitly provided. |
-| `frontend/app.js` | Added a `Scrape` step to the progress tracker. |
-
-Design decision: scraping fires **only** when the user fills the **Website**
-field, **not** when it just falls back to `BRAND_SITE` from `.env`.
+### Generation reliability fixes
+- `llm.py` `parse_json_object()`: all `json.loads()` calls now use
+  `strict=False` to accept literal newlines in JSON strings (model outputs
+  real `\n` instead of escaped `\\n`).
+- `generation.py`: `max_tokens` increased from 9000 → 16000 to ensure full
+  article + JSON fits without truncation.
+- `generation.py`: `schema_retries` increased from 0 → 1 so the model gets
+  a second chance when validation fails (self-correction via feedback loop).
 
 ---
 
-## 6. User Accounts / Auth (feature)
-
-- New module `backend/acl_agent/auth.py`:
-  - Users stored in `backend/data/users.json` (gitignored).
-  - Passwords hashed with **PBKDF2** (salt + hash), never plaintext.
-  - Opaque bearer tokens per session.
-- Endpoints:
-  - `POST /auth/signup`
-  - `POST /auth/login`
-  - `GET /auth/me`
-- Generation endpoints now require `Authorization: Bearer <token>`; 401
-  without it.
-- `user_id` in generation comes from the authenticated session (server-side),
-  not the request body.
-- Frontend: login/signup panel gate, token in `localStorage`, auto-fills the
-  User ID field, session-expiry handling (returns to login on 401).
-- Test account currently in `users.json`: **Alice / secret123**.
-  To reset, delete `backend\data\users.json`.
-
----
-
-## 7. Word Limits + Target Words + Guide (feature)
-
-### Word limits (validated server-side → 422, plus live UI counters)
-- **Additional Instructions** → 150 words (UI: `0/150 words`)
-- **Opening Hook Brief** → 30 words (UI: `0/30 words`)
-- **Brand Voice / Style Notes** → 100 words overall, 60 for type notes
-  (UI counters)
-
-### Custom target words
-- New **Target Words** number input (min 300, max 8000) that **overrides**
-  the preset Article Size when filled.
-- Sent as `target_word_count`; threaded `api → generate_1click →
-  auto_generate_brief`; clamped server-side to `300–8000`.
-- `SIZE_MAP` in `auto_brief.py`: `x-small=600, small=900, medium=1750,
-  large=2400, x-large=3600`.
-
-### "How Blog Agent Works" guide
-- `? How Blog Agent Works` button in the masthead opens a modal.
-- Explains the 6-step pipeline: keyword → SERP analysis → auto brief →
-  research grounding → single-call generation → validation.
-- Closes via ✕, backdrop click, or Escape.
-
----
-
-## 8. git / GitHub
-
-- **Repo:** `https://github.com/thusitha2001/acl-blog-agent` (PRIVATE, branch
-  `main`).
-- Protected by `.gitignore`: `.env`, `.venv/`, `__pycache__/`, `*.pyc`,
-  `data/`, `backend/data/`, `output/`, `backend/output/`.
-- The HF API key in `.env` is gitignored and has NOT been pushed.
-
-### Recent commit history (this session)
-```
-20fe... (8a4cf67) Word limits + target words + guide
-20cefb9            Simple user accounts (auth)
-f4c9995            Fix validation bugs
-88307c0            Request-time auto-scrape
-...                (earlier quality fixes + initial commit c00ded6)
-```
-
-### Manual push reminder
-If changes are made locally after this session, they need:
-```
-git add <files>
-git commit -m "..."
-git push origin main
-```
-
----
-
-## 9. ngrok
-
-- Installed v3.39.9-msix-stable.
-- Active public URL (while running): `https://speech-family-rise.ngrok-free.dev`
-  → `http://localhost:8001`.
-- ⚠️ **Security note:** the ngrok authtoken was shared in chat. Recommended to
-  rotate it in the ngrok dashboard.
-
----
-
-## 10. Running / Verification
-
-### Start the backend
-```
-& "E:\acl2\acl-blog-agent (3)\acl-blog-agent\.venv\Scripts\python.exe" app.py server
-```
-(working directory: `backend`). Health check: `GET http://localhost:8001/health`
-→ `{"status":"ok","knowledge_base_loaded":true,"knowledge_chunks":202}`.
-
-### Verified in this session
-- Backend healthy on :8001 (202 KB chunks).
-- ngrok tunnel active → public URL forwards.
-- Streaming (`/generate-1click-stream`) sends ordered SSE chunks with
-  keepalives every 15 s and completes with a `result` event.
-- Auth: signup / login / wrong-password(401) / duplicate(409) /
-  no-token(401) all correct, including via the public ngrok URL.
-- Word limits: oversized fields → 422.
-- Target word clamp: `100→300`, `9000→8000`; out-of-range → 422.
-
----
-
-## 11. Architecture (for reference)
+## 4. Architecture
 
 ### Directory layout
 ```
@@ -207,64 +99,100 @@ backend/
   app.py                  # entry point (python app.py <cmd> | uvicorn app:app)
   requirements.txt
   acl_agent/
-    api.py               # FastAPI app: SWEENT auth + SSE endpoints, keepalive
-    auth.py              # signup/login/verify
-    auto_brief.py        # SERP analysis + brief generation (SIZE_MAP)
-    cli.py               # ingest / generate / quick / validate / server
-    config.py            # env vars, paths, constants
-    generation.py        # single-call system prompt, generate_single_call_article, extra_validate
-    knowledge_base.py    # FAISS + BM25 + reranker hybrid retrieval
-    llm.py               # model clients (HF fallback)
-    models.py            # ContentBrief, SingleCallArticle, SEOAnalysis, etc.
-    pipeline_1click.py   # generate_1click / generate_full_pipeline orchestration
-    scraping.py          # fetch_url, scrape_blog_list/content, scrape_url_for_request, chunk_text
-    validation.py        # word_count, count_h1, keyword_count, validate_internal_links, etc.
+    api.py                # FastAPI app: SSE endpoints, keepalive (no auth on gen)
+    auth.py               # user accounts (signup/login/token) — unused by frontend
+    auto_brief.py         # SERP analysis + brief generation (SIZE_MAP)
+    cli.py                # ingest / generate / quick / validate / server
+    config.py             # env vars, paths, constants
+    generation.py         # single-call prompt, generate_single_call_article, extra_validate
+    knowledge_base.py     # FAISS + BM25 + reranker hybrid retrieval
+    llm.py                # model clients, JSON parsing/repair, retry logic
+    models.py             # ContentBrief, SingleCallArticle, SEOAnalysis, etc.
+    pipeline_1click.py    # generate_1click / generate_full_pipeline orchestration
+    scraping.py           # fetch_url, scrape_blog_list/content, scrape_url_for_request, chunk_text
+    validation.py         # word_count, count_h1, keyword_count, validate_internal_links, etc.
 frontend/
-  index.html             # form + auth panel + guide modal
-  app.js                  # SSE reader, auth, word counters, guide, tracker
-  styles.css
+  index.html              # redesigned form + guide modal (no auth UI)
+  app.js                  # SSE reader, word counters, guide, dynamic tracker
+  styles.css              # full CSS matching new HTML class names
 .env                      # gitignored (HF_API_KEY, MODEL, etc.)
 .gitignore
+memory.md                 # this file
 ```
 
 ### Flow — `generate-1click-stream`
-1. Auth gate (Bearer token).
-2. SSE stream starts; `stage` events emitted progressively.
-3. `analyze_serp` → competitor data.
-4. `auto_generate_brief` → `ContentBrief`.
-5. Request-time scrape of user Website (if provided) → extra context.
-6. `generate_single_call_article` → article Markdown + SEO metadata
-   (single model call; retries, validation via `extra_validate`).
-7. `result` event with article + SEO + validation; keepalives each 15 s.
+1. SSE stream starts; `stage` events emitted progressively.
+2. `analyze_serp` → competitor data.
+3. `auto_generate_brief` → `ContentBrief`.
+4. Request-time scrape of user Website (if provided) → extra context.
+5. `generate_single_call_article` → article Markdown + SEO metadata
+   (single model call with 1 retry; validation via `extra_validate`).
+6. `result` event with article + SEO + validation; keepalives each 15 s.
 
 ---
 
-## 12. Known Issues / Limitations
+## 5. git / GitHub
+
+- **Repo:** `https://github.com/thusitha2001/acl-blog-agent` (PRIVATE, branch
+  `main`).
+- Protected by `.gitignore`: `.env`, `.venv/`, `__pycache__/`, `*.pyc`,
+  `data/`, `backend/data/`, `output/`, `backend/output/`.
+- The HF API key in `.env` is gitignored and has NOT been pushed.
+
+### Recent commits
+```
+72f8866  Redesign frontend, remove auth, fix generation reliability
+20fe...  Word limits + target words + guide
+20cefb9  Simple user accounts (auth)
+f4c9995  Fix validation bugs
+88307c0  Request-time auto-scrape
+```
+
+---
+
+## 6. Running / Verification
+
+### Start the backend
+```powershell
+# From backend/
+& "..\.venv\Scripts\python.exe" app.py server
+```
+Health check: `GET http://localhost:8001/health`
+→ `{"status":"ok","knowledge_base_loaded":true,"knowledge_chunks":202}`.
+
+### Verified
+- Backend healthy on :8001 (202 KB chunks).
+- Frontend serves at `http://localhost:8001` (no login required).
+- Streaming (`/generate-1click-stream`) accepts requests without auth.
+- SSE events flow correctly through SERP → Brief → Draft → SEO → Validate.
+- CSS, JS, HTML all serve with correct content types.
+
+---
+
+## 7. Known Issues / Limitations
 
 - **HF free API** rate limits (~1–2 req/min per IP) → only ~1 user can
   generate at a time; this is the barrier to true concurrent/multi-user use.
-- **GLM-4.6** often returns empty/invalid JSON → sporadic `500`s on
-  generation (validation passes, model itself errors).
+- **Llama-3.1-8B** on HF free may occasionally produce invalid JSON
+  (mitigated by `schema_retries=1` and `strict=False` parsing).
 - **Biggest recommended fix:** switch to a parallel-capable provider
   (**Groq / OpenAI / Gemini**) — would cut generation time to ~30–60 s and
   enable multi-user. Requires a provider API key (not yet obtained).
 
 ---
 
-## 13. Next Steps / Open Items
+## 8. Next Steps
 
 - [ ] Switch generation to Groq/OpenAI/Gemini (needs user API key) for
       speed + reliability + true multi-user.
 - [ ] Rotate the ngrok authtoken (was shared in chat).
 - [ ] Optionally add a custom "target words" override to the CLI `quick`
       command (frontend + API already support it).
-- [ ] Reset/remove the demo `Alice` test account before real deployment.
 
 ---
 
-## 14. Conversation Context Notes
+## 9. Environment Notes
 
-- User is Tamil-speaking; some of the conversation was answered in Tamil.
 - Developer environment is **Windows** (PowerShell 5.1, `win32`).
 - Terminal quirks: PowerShell does not support `&&`; use `;` / `if ($?)`.
 - Paths with spaces or parentheses require the call operator

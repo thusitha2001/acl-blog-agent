@@ -21,14 +21,17 @@ Output streams progressively to the browser over SSE so you watch it happen.
 ## Features
 
 - **One-click generation** from just a keyword (or full custom brief).
-- **Simple user accounts** — signup / login (PBKDF2-hashed passwords, bearer
-  tokens); the API is protected.
+- **No auth required** — open generation endpoints.
 - **Custom target word count** (300–8000) that overrides preset sizes.
 - **Word limits** on Additional Instructions (150), Hook Brief (30), and
   Brand Voice (100), with live UI counters.
 - **Request-time scraping** of a user-provided website (in-memory only).
 - **SSE streaming** with 15-second keepalives (survives proxies like ngrok).
-- **"How Blog Agent Works"** in-app guide.
+- **"How Blog Agent Works" guide** — in-app modal explaining the pipeline.
+- **Dynamic progress tracker** — shows 5 or 6 stages based on whether a
+  website URL is provided.
+- **Custom brand voice** editor (tone, vocabulary, style notes, avoid list).
+- **Structure toggle chips** — tables, H3, lists, quotes, italics, bold.
 - Built-in **fact verification**, **heading-hierarchy** control, **Markdown**
   correctness, and **repetition** checks.
 
@@ -37,8 +40,9 @@ Output streams progressively to the browser over SSE so you watch it happen.
 ## Tech Stack
 
 - **Backend:** Python 3.12+, FastAPI, Pydantic v2, Uvicorn
-- **Generation / retrieval:** Hugging Face free inference API, Sentence
-  Transformers, FAISS + BM25 hybrid search with a cross-encoder reranker
+- **Generation / retrieval:** Hugging Face free inference API (Llama-3.1-8B),
+  Sentence Transformers, FAISS + BM25 hybrid search with a cross-encoder
+  reranker
 - **Scraping:** BeautifulSoup (`bs4`) + requests
 - **Frontend:** vanilla HTML/CSS/JS (no build step), SSE consumption
 
@@ -47,7 +51,7 @@ Output streams progressively to the browser over SSE so you watch it happen.
 ## Requirements
 
 - Python **3.12.x** (the venv used here was built with 3.12.10)
-- A Hugging Face API key (or another supported provider)
+- A Hugging Face API key
 - See `backend/requirements.txt` for full package list.
 
 ---
@@ -90,8 +94,8 @@ Output streams progressively to the browser over SSE so you watch it happen.
 & "..\.venv\Scripts\python.exe" app.py server
 ```
 
-Then open http://localhost:8001 in a browser. You'll be asked to log in or
-create an account, then you can generate articles.
+Then open http://localhost:8001 in a browser. Enter a keyword and click
+Generate — no login required.
 
 Health check:
 
@@ -135,15 +139,12 @@ python app.py quick "how to choose linen table runners" --size medium
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/auth/signup` | – | Create an account. Body: `{name, password}` |
-| POST | `/auth/login` | – | Log in. Body: `{name, password}` → `{user_id, name, token}` |
-| GET | `/auth/me` | Bearer | Return the current user. |
-| POST | `/generate-1click` | Bearer | Non-streaming full generation. |
-| POST | `/generate-1click-stream` | Bearer | SSE-streamed generation (recommended). |
+| POST | `/generate-1click` | – | Non-streaming full generation. |
+| POST | `/generate-1click-stream` | – | SSE-streamed generation (recommended). |
 | GET | `/health` | – | Health / KB status. |
-
-Send `Authorization: Bearer <token>` from `/auth/login` or `/auth/signup` to
-the generation endpoints.
+| POST | `/auth/signup` | – | Create an account (unused by frontend). |
+| POST | `/auth/login` | – | Log in (unused by frontend). |
+| GET | `/auth/me` | Bearer | Return the current user (unused by frontend). |
 
 ### `OneClickRequest` main fields
 
@@ -155,11 +156,15 @@ the generation endpoints.
 | `target_word_count` | Optional exact word count (300–8000), overrides `size`. |
 | `article_type` | `how-to, listicle, review, news, comparison, ...` |
 | `tone` | `friendly, professional, informational, ...` |
+| `point_of_view` | `first-singular, first-plural, second, third`. |
+| `readability` | `5th, 6th, 7th, 8th-9th, college, ...` |
 | `brand_name` / `website` | Brand override + website to scrape at request time. |
 | `brand_voice` | Max **100 words**. |
+| `hook_type` | `question, statistic, fact, anecdote`. |
 | `hook_brief` | Max **30 words**. |
 | `additional_instructions` | Max **150 words** (and 1000 chars). |
-| `include_faq/_takeaways/_conclusion/_tables/_h3/_lists/_quotes` | Structure toggles. |
+| `include_faq/_takeaways/_conclusion` | Toggle sections on/off. |
+| `include_tables/_h3/_lists/_quotes/_italics/_bold` | Structure toggles. |
 
 ---
 
@@ -170,7 +175,7 @@ Create a `.env` in the project root. Key variables:
 | Variable | Purpose |
 |----------|---------|
 | `HF_API_KEY` | Hugging Face API key for model inference. **Do not commit.** |
-| `MODEL` | Generation model (e.g. `zai-org/GLM-4.6`). |
+| `MODEL` | Generation model (default: `meta-llama/Llama-3.1-8B-Instruct`). |
 | `BRAND_NAME` | Default brand name. |
 | `BRAND_SITE` | Default brand website (used for internal-link grounding). |
 | `BLOG_URL` | Blog listing URL used by `ingest`. |
@@ -194,20 +199,22 @@ backend/
   app.py                  # entry point (server + CLI)
   requirements.txt
   acl_agent/
-    api.py                # FastAPI app: auth + SSE endpoints, keepalives
-    auth.py               # user accounts (signup/login/token)
+    api.py                # FastAPI app: SSE endpoints, keepalives
+    auth.py               # user accounts (unused by frontend)
     auto_brief.py         # SERP + brief generation (SIZE_MAP)
     cli.py                # CLI subcommands
     config.py             # env + constants
     generation.py         # single-call prompt + generate_single_call_article
     knowledge_base.py     # FAISS + BM25 + reranker retrieval
-    llm.py                # model clients
+    llm.py                # model clients, JSON parsing, retry logic
     models.py             # Pydantic models
     pipeline_1click.py    # orchestration (generate_1click / generate_full_pipeline)
     scraping.py           # fetching/scraping/chunking
     validation.py         # quality validators
 frontend/
-  index.html, app.js, styles.css
+  index.html              # form + guide modal (no auth UI)
+  app.js                  # SSE reader, word counters, dynamic tracker
+  styles.css              # full CSS matching HTML class names
 .env                      # gitignored
 .gitignore
 memory.md                 # session/state log
@@ -218,9 +225,9 @@ memory.md                 # session/state log
 ## Known limitations
 
 - **HF free API rate limits** restrict to roughly one concurrent generation;
-  GLM-4.6 can occasionally return invalid JSON (sporadic 500s). For faster,
-  reliable, multi-user generation, switch to a parallel-capable provider
-  (Groq / OpenAI / Gemini).
+  the 8B model may occasionally return invalid JSON (mitigated by retry and
+  lenient parsing). For faster, reliable, multi-user generation, switch to a
+  parallel-capable provider (Groq / OpenAI / Gemini).
 - Request-time website scraping only runs when the **Website** field is
   filled in (not when it falls back to the `.env` brand site).
 
