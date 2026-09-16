@@ -133,6 +133,25 @@ def login_user(name: str, password: str) -> dict | None:
         }
 
 
+def logout_user(token: str) -> None:
+    """Invalidates the current session token."""
+    if not token:
+        return
+    with _lock:
+        users = _load_users()
+        changed = False
+        for user in users:
+            stored = user.get("token") or ""
+            if not stored or len(stored) != len(token):
+                continue
+            if hmac.compare_digest(stored, token):
+                user["token"] = secrets.token_hex(24)
+                changed = True
+                break
+        if changed:
+            _save_users(users)
+
+
 def verify_token(token: str) -> dict | None:
     """Returns the user record if the token is valid, else None."""
     if not token:
@@ -140,7 +159,10 @@ def verify_token(token: str) -> dict | None:
 
     with _lock:
         for user in _load_users():
-            if hmac.compare_digest(user["token"], token):
+            stored = user.get("token") or ""
+            if not stored or len(stored) != len(token):
+                continue
+            if hmac.compare_digest(stored, token):
                 return {
                     "user_id": user["user_id"],
                     "name": user["name"],

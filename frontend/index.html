@@ -3,26 +3,59 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Blog Agent</title>
+<title>Blog Writer · Blog Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/workspace.css">
 </head>
-<body>
+<body class="ws" data-page="writer">
+
+<div class="workspace">
+  <div class="ws-backdrop" id="ws-backdrop"></div>
+  <div class="ws-col">
+    <header class="ws-topbar">
+      <div style="display:flex;align-items:center;gap:10px">
+        <button type="button" class="ws-menu" id="ws-menu" aria-label="Open navigation">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <nav class="ws-crumb" aria-label="Breadcrumb"><a href="/">Workspace</a> / <strong>Blog Writer</strong></nav>
+      </div>
+      <div class="ws-top-actions">
+        <button type="button" class="btn-icon guide-trigger" id="guide-trigger" aria-label="How it works">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          <span class="btn-label">Guide</span>
+        </button>
+        <a class="ws-user-chip" href="/settings">
+          <span class="ws-avatar">AB</span>
+          <span>
+            <strong style="display:block;font-size:13px">Avan B</strong>
+            <span style="font-size:11px;color:#8a839e">Designer</span>
+          </span>
+        </a>
+      </div>
+    </header>
+    <div class="ws-page">
 
 <div class="app-shell">
   <header class="header">
     <div class="header-left">
-      <div class="brand">
+      <a href="/" class="brand" aria-label="Blog Agent home">
         <span class="brand-mark" aria-hidden="true"></span>
         <span class="brand-text">Blog Agent</span>
-      </div>
-      <span class="header-tagline">Keyword → Publish-ready article</span>
+      </a>
     </div>
-    <button type="button" class="btn-icon guide-trigger" aria-label="How it works">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-      <span class="btn-label">Guide</span>
-    </button>
+    <nav class="main-nav" aria-label="Main">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/writer" class="nav-link is-active" aria-current="page">Blog Writer</a>
+      <a href="/rewriter" class="nav-link">Blog Rewriter</a>
+    </nav>
+    <div class="header-actions">
+      <button type="button" class="btn-icon guide-trigger" aria-label="How it works">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+        <span class="btn-label">Guide</span>
+      </button>
+    </div>
   </header>
 
   <main class="main-content">
@@ -44,10 +77,29 @@
               </div>
             </div>
 
+            <div class="field-row">
+              <div class="field-group">
+                <label for="title" class="field-label">Title</label>
+                <input type="text" id="title" name="title" placeholder="Auto-generated from SERP if empty" maxlength="200" autocomplete="off">
+                <p class="field-hint">Leave empty to auto-generate from competitor analysis</p>
+              </div>
+
+              <div class="field-group">
+                <label for="search-intent" class="field-label">Search Intent</label>
+                <select id="search-intent" name="search_intent">
+                  <option value="informational" selected>Informational</option>
+                  <option value="commercial">Commercial</option>
+                  <option value="transactional">Transactional</option>
+                  <option value="navigational">Navigational</option>
+                </select>
+                <p class="field-hint">Why the reader is searching. Shapes the article's goal.</p>
+              </div>
+            </div>
+
             <div class="field-group">
-              <label for="title" class="field-label">Title</label>
-              <input type="text" id="title" name="title" placeholder="Auto-generated from SERP if empty" maxlength="200" autocomplete="off">
-              <p class="field-hint">Leave empty to auto-generate from competitor analysis</p>
+              <label for="audience" class="field-label">Target Audience <span class="word-count-badge" id="audience-count">0/40 words</span></label>
+              <input type="text" id="audience" name="audience" placeholder="e.g. US homeowners shopping for table linens" maxlength="300" autocomplete="off">
+              <p class="field-hint">Who the article is for. Leave empty to infer from search results.</p>
             </div>
           </section>
 
@@ -157,34 +209,37 @@
               <p class="section-desc">Choose what appears in the article</p>
             </header>
 
-            <div class="toggle-grid">
-              <label class="toggle-chip" data-for="include-tables">
-                <input type="checkbox" id="include-tables" name="include_tables">
-                <span class="chip-label">Tables</span>
-              </label>
-              <label class="toggle-chip active" data-for="include-h3">
-                <input type="checkbox" id="include-h3" name="include_h3" checked>
-                <span class="chip-label">H3 Headings</span>
-              </label>
-              <label class="toggle-chip active" data-for="include-lists">
-                <input type="checkbox" id="include-lists" name="include_lists" checked>
-                <span class="chip-label">Lists</span>
-              </label>
-              <label class="toggle-chip" data-for="include-quotes">
-                <input type="checkbox" id="include-quotes" name="include_quotes">
-                <span class="chip-label">Quotes</span>
-              </label>
-              <label class="toggle-chip" data-for="include-italics">
-                <input type="checkbox" id="include-italics" name="include_italics">
-                <span class="chip-label">Italics</span>
-              </label>
-              <label class="toggle-chip active" data-for="include-bold">
-                <input type="checkbox" id="include-bold" name="include_bold" checked>
-                <span class="chip-label">Bold</span>
-              </label>
-            </div>
-
             <div class="toggle-list">
+              <label class="toggle-row">
+                <span class="toggle-text">Tables</span>
+                <input type="checkbox" id="include-tables" name="include_tables" class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+              <label class="toggle-row">
+                <span class="toggle-text">H3 Headings</span>
+                <input type="checkbox" id="include-h3" name="include_h3" checked class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+              <label class="toggle-row">
+                <span class="toggle-text">Lists</span>
+                <input type="checkbox" id="include-lists" name="include_lists" checked class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+              <label class="toggle-row">
+                <span class="toggle-text">Quotes</span>
+                <input type="checkbox" id="include-quotes" name="include_quotes" class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+              <label class="toggle-row">
+                <span class="toggle-text">Italics</span>
+                <input type="checkbox" id="include-italics" name="include_italics" class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
+              <label class="toggle-row">
+                <span class="toggle-text">Bold</span>
+                <input type="checkbox" id="include-bold" name="include_bold" class="toggle-input">
+                <span class="toggle-slider"></span>
+              </label>
               <label class="toggle-row">
                 <span class="toggle-text">Include FAQ</span>
                 <input type="checkbox" id="include-faq" name="include_faq" checked class="toggle-input">
@@ -246,6 +301,12 @@
                 <input type="url" id="website" name="website" placeholder="https://www.example.com" maxlength="300" autocomplete="off">
                 <p class="field-hint">Scraped at request time for grounding. Not stored.</p>
               </div>
+            </div>
+
+            <div class="field-group">
+              <label for="internal-links" class="field-label">Internal Links</label>
+              <textarea id="internal-links" name="internal_links" placeholder="One per line. URL, or Anchor text | https://yoursite.com/page" maxlength="2000" rows="3"></textarea>
+              <p class="field-hint">Related pages on your site. Use URLs from your Website domain. Woven into the article as Markdown links.</p>
             </div>
 
             <div class="field-group brand-voice-section">
@@ -331,71 +392,141 @@
     <p>Blog Agent · SEO content system</p>
   </footer>
 </div>
+    </div>
+  </div>
+</div>
 
 <div id="guide-overlay" class="guide-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="guide-title">
   <div class="guide-modal">
     <header class="guide-header">
-      <h2 id="guide-title">How Blog Agent Works</h2>
+      <h2 id="guide-title">How to Create a High-Quality Blog Article</h2>
       <button type="button" class="guide-close" aria-label="Close guide">×</button>
     </header>
     <div class="guide-body">
-      <ol class="guide-steps">
-        <li class="guide-step">
-          <span class="step-number">1</span>
-          <div class="step-content">
-            <h3>Enter a keyword</h3>
-            <p>Start with the topic or phrase you want to rank for (e.g. "how to choose linen table runners"). The system builds the entire article around this.</p>
-          </div>
-        </li>
-        <li class="guide-step">
-          <span class="step-number">2</span>
-          <div class="step-content">
-            <h3>SERP analysis</h3>
-            <p>Blog Agent analyzes your keyword's real search results: what competitors cover, which headings they use, related queries people ask, and ranking content gaps.</p>
-          </div>
-        </li>
-        <li class="guide-step">
-          <span class="step-number">3</span>
-          <div class="step-content">
-            <h3>Auto content brief</h3>
-            <p>The AI drafts a structured brief: title, target word count, required topics, secondary keywords, reader questions, and your formatting choices.</p>
-          </div>
-        </li>
-        <li class="guide-step">
-          <span class="step-number">4</span>
-          <div class="step-content">
-            <h3>Research grounding (optional)</h3>
-            <p>If you enter a <strong>Website</strong> URL, the system scrapes that site at request time so the article stays grounded on your brand's real content. Used for that one article only — never stored.</p>
-          </div>
-        </li>
-        <li class="guide-step">
-          <span class="step-number">5</span>
-          <div class="step-content">
-            <h3>Single-call article generation</h3>
-            <p>One model call writes the full article in Markdown, plus SEO metadata: meta title, meta description, FAQs, and image alt text. Output streams progressively so you watch it happen.</p>
-          </div>
-        </li>
-        <li class="guide-step">
-          <span class="step-number">6</span>
-          <div class="step-content">
-            <h3>Validation & quality checks</h3>
-            <p>Every draft is checked for word count, exactly one H1, clean Markdown, fact accuracy (no invented statistics/pricing), keyword repetition, and original wording.</p>
-          </div>
-        </li>
-      </ol>
+      <p class="guide-intro">Use the fields below to give the Blog Agent enough context to create a useful, SEO-friendly, publish-ready article.</p>
+
+      <div class="guide-fields">
+        <section class="guide-field">
+          <h3>Main Keyword</h3>
+          <p>Enter the main search keyword you want the article to target.</p>
+          <p class="guide-example">Example: summer outfit ideas</p>
+          <p class="guide-tip">Tip: Use one primary keyword. The agent can identify related keywords and topics from search results.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Search Intent</h3>
+          <p>Choose why someone would search this keyword. The article is written to match that intent.</p>
+          <p class="guide-example">Informational: they want to learn. Commercial: they are comparing options. Transactional: they are ready to buy or act. Navigational: they are looking for a specific brand, page, or product.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Title</h3>
+          <p>Enter your preferred article title.</p>
+          <p>If you leave this empty, the agent can generate a suitable title based on search intent and competitor analysis.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Target Audience</h3>
+          <p>Describe who the article is written for.</p>
+          <p class="guide-example">Example: US teenage girls and young women looking for affordable, comfortable summer outfit ideas</p>
+          <p class="guide-tip">Tip: Be specific about location, age group, interests, or buying intent when relevant.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Target Words</h3>
+          <p>Choose the approximate article length.</p>
+          <p class="guide-example">Example: 1200 words</p>
+          <p class="guide-tip">Tip: Don't choose an unnecessarily large word count. Let the search intent determine how much information the article needs.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Tone</h3>
+          <p>Choose the writing style that matches your audience and brand.</p>
+          <p class="guide-example">Examples: Friendly, Casual, Professional, Educational</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Article Type</h3>
+          <p>Choose the format that best matches the keyword.</p>
+          <p class="guide-example">Examples: How-to Guide, Listicle, Buying Guide, Informational Article</p>
+          <p>If you're unsure, use Auto-detect.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Point of View</h3>
+          <p>Choose how the article should address the reader.</p>
+          <p>For most consumer blogs, Second Person is a good choice because it naturally uses "you" and "your."</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Readability</h3>
+          <p>Choose the reading level that matches your audience.</p>
+          <p>For most general consumer content, 6th–8th grade readability provides a good balance between clarity and useful information.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Structure</h3>
+          <p>Enable the sections that are useful for your article.</p>
+          <ul>
+            <li><strong>FAQ:</strong> Useful for answering common search questions.</li>
+            <li><strong>Key Takeaways:</strong> Useful for summarizing the most important points.</li>
+            <li><strong>Conclusion:</strong> Useful for closing the article and reinforcing the main message.</li>
+          </ul>
+        </section>
+
+        <section class="guide-field">
+          <h3>Hook</h3>
+          <p>Choose how the article should begin.</p>
+          <p>A question works well for many informational topics.</p>
+          <p class="guide-example">Example: What should you wear when the summer heat starts to rise?</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Brand</h3>
+          <p>Enter your brand name and website.</p>
+          <p class="guide-example">Example: All Cotton and Linen</p>
+          <p>Adding your website helps the article stay aligned with your brand and allows relevant internal links to be used.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Internal Links</h3>
+          <p>Add relevant pages from your website.</p>
+          <p>Recommended format:</p>
+          <p class="guide-example">Anchor text | URL</p>
+          <p class="guide-example">Example: women's high hip T-shirt | https://example.com/product-page</p>
+          <p class="guide-tip">Tip: Only add pages that are genuinely relevant to the article. The agent will place links naturally where they provide value to the reader.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Brand Voice</h3>
+          <p>Describe how you want your brand to sound.</p>
+          <p class="guide-example">Example: Friendly, practical, modern, natural, and helpful without sounding overly promotional.</p>
+        </section>
+
+        <section class="guide-field">
+          <h3>Additional Instructions</h3>
+          <p>Use this field for article-specific requirements that are not covered by the other settings.</p>
+          <p>Good examples:</p>
+          <ul>
+            <li>Write naturally for a US audience.</li>
+            <li>Use practical examples.</li>
+            <li>Keep the content conversational and specific.</li>
+            <li>Make the article SEO, AEO, and GEO friendly.</li>
+            <li>Avoid keyword stuffing and repetitive wording.</li>
+          </ul>
+        </section>
+      </div>
 
       <div class="guide-tips">
-        <h3>Pro tips</h3>
-        <ul>
-          <li><strong>Target Words</strong> lets you request any length from 300 to 8,000 words — it overrides the preset Article Size.</li>
-          <li><strong>Additional Instructions, Hook Brief, and Brand Voice</strong> are capped by word count to keep the brief focused.</li>
-          <li><strong>Website field</strong> triggers a fresh scrape for that request only — great for grounding on your latest content.</li>
-        </ul>
+        <h3>Best Practice</h3>
+        <p>For the best results, provide a clear keyword, specific target audience, relevant internal links, and a short description of your preferred brand voice.</p>
+        <p>The Blog Agent will use these inputs together with search and competitor analysis to create the article.</p>
       </div>
     </div>
   </div>
 </div>
 
+<script src="/assets/workspace.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

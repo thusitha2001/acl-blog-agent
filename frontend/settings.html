@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Settings · Blog Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/workspace.css">
+</head>
+<body class="ws" data-page="settings">
+<div class="workspace">
+  <div class="ws-backdrop" id="ws-backdrop"></div>
+  <div class="ws-col">
+    <header class="ws-topbar">
+      <div style="display:flex;align-items:center;gap:10px">
+        <button type="button" class="ws-menu" id="ws-menu" aria-label="Open navigation">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <nav class="ws-crumb" aria-label="Breadcrumb"><a href="/">Workspace</a> / <strong>Settings</strong></nav>
+      </div>
+      <a class="ws-user-chip" href="/settings">
+        <span class="ws-avatar">AB</span>
+        <span><strong style="display:block;font-size:13px">Account</strong><span style="font-size:11px;color:#8a839e">Settings</span></span>
+      </a>
+    </header>
+    <main class="ws-page settings-page">
+      <section class="ed-head">
+        <div class="ed-head-copy">
+          <p class="dash-kicker">Account</p>
+          <h1>Settings</h1>
+          <p class="ed-status">Manage your workspace session</p>
+        </div>
+      </section>
+      <section class="ca-card settings-card">
+        <div class="settings-user">
+          <span class="ws-avatar settings-avatar" id="settings-avatar">AB</span>
+          <div>
+            <h2 id="settings-name">Account</h2>
+            <p id="settings-meta">Signed in to Blog Agent</p>
+          </div>
+        </div>
+        <button type="button" class="ed-btn-secondary" id="settings-logout">Log out</button>
+      </section>
+    </main>
+  </div>
+</div>
+<script src="/assets/workspace.js"></script>
+</body>
+</html>

@@ -1,8 +1,8 @@
 """
 ACL Blog Agent - model call helpers.
 
-Wraps the Hugging Face InferenceClient with retry logic, JSON
-parsing/repair, and schema+content validation retries.
+Wraps the configured chat client (OpenAI or Hugging Face) with retry
+logic, JSON parsing/repair, and schema+content validation retries.
 """
 from __future__ import annotations
 
@@ -13,11 +13,15 @@ from typing import Any, Callable, Optional, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from acl_agent.config import MODEL, client, logger
+from acl_agent.config import LLM_PROVIDER, MODEL, client, logger
 
 T = TypeVar("T", bound=BaseModel)
 
-FALLBACK_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+FALLBACK_MODEL = (
+    "gpt-4o-mini"
+    if LLM_PROVIDER == "openai"
+    else "meta-llama/Llama-3.1-8B-Instruct"
+)
 
 
 def _repair_json(text: str) -> str:
@@ -212,13 +216,13 @@ def is_retryable_error(error: Exception) -> bool:
         "503",
         "502",
         "504",
+    ]
+
+    if LLM_PROVIDER == "huggingface":
         # HF Inference Providers can return a bare, detail-free 400
         # when the router lands a request on a provider that's at
-        # capacity (common under concurrent multi-user load) rather
-        # than a clean 429 - worth one retry before giving up.
-        "bad request",
-        "400",
-    ]
+        # capacity rather than a clean 429.
+        retry_markers.extend(["bad request", "400"])
 
     return any(
         marker in error_text

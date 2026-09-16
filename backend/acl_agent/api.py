@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError
 
 from acl_agent import knowledge_base
-from acl_agent.auth import login_user, signup_user, verify_token
+from acl_agent.auth import login_user, logout_user, signup_user, verify_token
 from acl_agent.config import (
     ALLOWED_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
@@ -26,8 +27,10 @@ from acl_agent.config import (
     logger,
 )
 from acl_agent.knowledge_base import load_knowledge_base
-from acl_agent.models import ContentBrief
+from acl_agent.models import ContentBrief, InternalLink, KeywordTarget, SEOAnalysis
+from acl_agent.competitors import analyze_competitors
 from acl_agent.pipeline_1click import generate_1click, generate_full_pipeline
+from acl_agent.rewrite import rewrite_article
 
 
 @asynccontextmanager
@@ -62,7 +65,37 @@ if FRONTEND_DIR.exists():
 
 @app.get("/", include_in_schema=False)
 def index():
+    return FileResponse(str(FRONTEND_DIR / "dashboard.html"))
+
+
+@app.get("/writer", include_in_schema=False)
+def writer_page():
     return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+@app.get("/rewriter", include_in_schema=False)
+def rewriter_page():
+    return FileResponse(str(FRONTEND_DIR / "rewriter.html"))
+
+
+@app.get("/competitors", include_in_schema=False)
+def competitors_page():
+    return FileResponse(str(FRONTEND_DIR / "competitors.html"))
+
+
+@app.get("/editor", include_in_schema=False)
+def editor_page():
+    return FileResponse(str(FRONTEND_DIR / "editor.html"))
+
+
+@app.get("/login", include_in_schema=False)
+def login_page():
+    return FileResponse(str(FRONTEND_DIR / "login.html"))
+
+
+@app.get("/settings", include_in_schema=False)
+def settings_page():
+    return FileResponse(str(FRONTEND_DIR / "settings.html"))
 
 
 @app.get("/health")
@@ -132,6 +165,13 @@ class OneClickRequest(BaseModel):
         default=None,
         max_length=200,
         description="Optional custom title",
+    )
+    search_intent: str = Field(
+        default="informational",
+        description=(
+            "Search intent: informational, commercial, "
+            "transactional, or navigational"
+        ),
     )
     size: str = Field(
         default="medium",
@@ -206,7 +246,7 @@ class OneClickRequest(BaseModel):
         description="Use italics for emphasis",
     )
     include_bold: bool = Field(
-        default=True,
+        default=False,
         description="Use bold for emphasis",
     )
     additional_instructions: str = Field(
@@ -228,6 +268,35 @@ class OneClickRequest(BaseModel):
         max_length=500,
         description="Brand voice description (max 100 words)",
     )
+    audience: Optional[str] = Field(
+        default=None,
+        max_length=300,
+        description="Target audience for the article (max 40 words)",
+    )
+    internal_links: list[InternalLink] = Field(
+        default_factory=list,
+        description=(
+            "Internal pages to weave into the article. "
+            "Each item needs url, plus optional anchor_text and reason."
+        ),
+    )
+
+    @field_validator("search_intent")
+    @classmethod
+    def _valid_search_intent(cls, value: str) -> str:
+        allowed = {
+            "informational",
+            "commercial",
+            "transactional",
+            "navigational",
+        }
+        normalized = (value or "").strip().lower()
+        if normalized not in allowed:
+            raise ValueError(
+                "Search Intent must be informational, commercial, "
+                "transactional, or navigational."
+            )
+        return normalized
 
     @field_validator("additional_instructions")
     @classmethod
@@ -258,6 +327,128 @@ class OneClickRequest(BaseModel):
                 f"(got {len(value.split())})."
             )
         return value
+
+    @field_validator("audience")
+    @classmethod
+    def _word_limit_audience(cls, value: Optional[str]) -> Optional[str]:
+        if value and len(value.split()) > 40:
+            raise ValueError(
+                "Target Audience must be 40 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
+
+    @field_validator("internal_links")
+    @classmethod
+    def _limit_internal_links(
+        cls,
+        value: list[InternalLink],
+    ) -> list[InternalLink]:
+        if len(value) > 12:
+            raise ValueError("Internal Links limited to 12 URLs.")
+        return value
+
+
+class RewriteRequest(BaseModel):
+    source_article: str = Field(
+        min_length=200,
+        max_length=50000,
+        description="Existing article to rewrite (HTML or plain text).",
+    )
+    keyword: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional primary keyword for the rewritten piece.",
+    )
+    title: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional title for the rewritten article.",
+    )
+    tone: str = Field(default="friendly")
+    target_word_count: Optional[int] = Field(
+        default=None,
+        ge=300,
+        le=8000,
+    )
+    point_of_view: Optional[str] = Field(default=None)
+    readability: Optional[str] = Field(default=None)
+    language: str = Field(default="en-US")
+    brand_name: Optional[str] = Field(default=None, max_length=200)
+    website: Optional[str] = Field(default=None, max_length=300)
+    brand_voice: Optional[str] = Field(default=None, max_length=500)
+    audience: Optional[str] = Field(default=None, max_length=300)
+    additional_instructions: str = Field(default="", max_length=1000)
+    include_faq: bool = True
+    include_takeaways: bool = True
+    include_conclusion: bool = True
+    include_tables: bool = False
+    include_h3: bool = True
+    include_lists: bool = True
+    include_quotes: bool = False
+
+    @field_validator("keyword")
+    @classmethod
+    def _empty_keyword(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("additional_instructions")
+    @classmethod
+    def _rewrite_word_limit_instructions(cls, value: str) -> str:
+        if len(value.split()) > 150:
+            raise ValueError(
+                "Additional Instructions must be 150 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
+
+    @field_validator("audience")
+    @classmethod
+    def _rewrite_word_limit_audience(cls, value: Optional[str]) -> Optional[str]:
+        if value and len(value.split()) > 40:
+            raise ValueError(
+                "Target Audience must be 40 words or fewer "
+                f"(got {len(value.split())})."
+            )
+        return value
+
+
+class CompetitorAnalyzeRequest(BaseModel):
+    blog_url: Optional[str] = Field(default=None, max_length=500)
+    keyword: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("blog_url")
+    @classmethod
+    def _clean_blog_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if not re.match(r"^https?://", stripped, flags=re.IGNORECASE):
+            raise ValueError("Blog URL must start with http:// or https://")
+        return stripped
+
+    @field_validator("keyword")
+    @classmethod
+    def _clean_keyword(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class ScoreArticleRequest(BaseModel):
+    article: str = Field(min_length=20, max_length=80000)
+    keyword: Optional[str] = Field(default=None, max_length=200)
+    title: Optional[str] = Field(default=None, max_length=200)
+    meta_title: Optional[str] = Field(default=None, max_length=200)
+    meta_description: Optional[str] = Field(default=None, max_length=500)
+    target_word_count: Optional[int] = Field(default=None, ge=300, le=8000)
+    secondary_keywords: list[str] = Field(default_factory=list)
 
 
 class AuthRequest(BaseModel):
@@ -321,9 +512,16 @@ def auth_me(user: dict = Depends(require_auth)):
     return user
 
 
+@app.post("/auth/logout")
+def auth_logout(user: dict = Depends(require_auth)):
+    logout_user(user["token"])
+    return {"ok": True}
+
+
 @app.post("/generate-1click")
 def generate_1click_endpoint(
     request: OneClickRequest,
+    _user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
 
@@ -331,6 +529,7 @@ def generate_1click_endpoint(
         result = generate_1click(
             keyword=request.keyword,
             title=request.title,
+            search_intent=request.search_intent,
             size=request.size,
             target_word_count=request.target_word_count,
             article_type=request.article_type,
@@ -356,6 +555,8 @@ def generate_1click_endpoint(
             additional_instructions=(
                 request.additional_instructions
             ),
+            audience=request.audience,
+            internal_links=request.internal_links or None,
         )
 
         result["request_id"] = request_id
@@ -378,6 +579,7 @@ def generate_1click_endpoint(
 @app.post("/generate-1click-stream")
 async def generate_1click_stream_endpoint(
     request: OneClickRequest,
+    _user: dict = Depends(require_auth),
 ):
     request_id = str(uuid.uuid4())
     queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
@@ -403,6 +605,7 @@ async def generate_1click_stream_endpoint(
                     generate_1click,
                     keyword=request.keyword,
                     title=request.title,
+                    search_intent=request.search_intent,
                     size=request.size,
                     target_word_count=request.target_word_count,
                     article_type=request.article_type,
@@ -428,6 +631,8 @@ async def generate_1click_stream_endpoint(
                     additional_instructions=(
                         request.additional_instructions
                     ),
+                    audience=request.audience,
+                    internal_links=request.internal_links or None,
                     on_event=lambda evt, data: emit(evt, data),
                 )
                 try:
@@ -490,3 +695,270 @@ async def generate_1click_stream_endpoint(
             "Connection": "keep-alive",
         },
     )
+
+
+@app.post("/rewrite-stream")
+async def rewrite_stream_endpoint(
+    request: RewriteRequest,
+    _user: dict = Depends(require_auth),
+):
+    request_id = str(uuid.uuid4())
+    queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
+    worker_loop: "asyncio.AbstractEventLoop | None" = None
+
+    async def event_stream():
+        nonlocal worker_loop
+
+        def emit(event_type: str, data: dict) -> None:
+            data["request_id"] = request_id
+            asyncio.run_coroutine_threadsafe(
+                queue.put((event_type, data)),
+                worker_loop,
+            )
+
+        async def runner():
+            nonlocal worker_loop
+            worker_loop = asyncio.get_running_loop()
+            try:
+                import functools
+                run_func = functools.partial(
+                    rewrite_article,
+                    source_article=request.source_article,
+                    keyword=request.keyword,
+                    title=request.title,
+                    tone=request.tone,
+                    target_word_count=request.target_word_count,
+                    point_of_view=request.point_of_view,
+                    readability=request.readability,
+                    brand_voice=request.brand_voice,
+                    language=request.language,
+                    brand_name=request.brand_name,
+                    website=request.website,
+                    audience=request.audience,
+                    additional_instructions=(
+                        request.additional_instructions
+                    ),
+                    include_faq=request.include_faq,
+                    include_takeaways=request.include_takeaways,
+                    include_conclusion=request.include_conclusion,
+                    include_tables=request.include_tables,
+                    include_h3=request.include_h3,
+                    include_lists=request.include_lists,
+                    include_quotes=request.include_quotes,
+                    on_event=lambda evt, data: emit(evt, data),
+                )
+                try:
+                    result = await asyncio.to_thread(run_func)
+                except Exception as error:
+                    logger.exception("stream rewrite failed")
+                    await queue.put(("error", {
+                        "message": str(error),
+                        "request_id": request_id,
+                    }))
+                else:
+                    await queue.put(("result", result))
+            finally:
+                await queue.put(("__done__", {"request_id": request_id}))
+
+        task = asyncio.create_task(runner())
+        KEEPALIVE_INTERVAL = 15.0
+        last_keepalive = time.monotonic()
+
+        try:
+            while True:
+                try:
+                    event_type, data = await asyncio.wait_for(
+                        queue.get(), timeout=0.5
+                    )
+                except asyncio.TimeoutError:
+                    if (
+                        time.monotonic() - last_keepalive
+                        >= KEEPALIVE_INTERVAL
+                    ):
+                        last_keepalive = time.monotonic()
+                        yield ": keepalive\n\n"
+                    continue
+
+                if event_type == "__done__":
+                    break
+
+                event_data = json.dumps(data, default=str)
+                yield f"event: {event_type}\ndata: {event_data}\n\n"
+                last_keepalive = time.monotonic()
+
+                if event_type in ("result", "error"):
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/analyze-competitors-stream")
+async def analyze_competitors_stream_endpoint(
+    request: CompetitorAnalyzeRequest,
+    _user: dict = Depends(require_auth),
+):
+    if not request.blog_url and not request.keyword:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Enter a blog URL or a target keyword."},
+        )
+
+    request_id = str(uuid.uuid4())
+    queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
+    worker_loop: "asyncio.AbstractEventLoop | None" = None
+
+    async def event_stream():
+        nonlocal worker_loop
+
+        def emit(event_type: str, data: dict) -> None:
+            data["request_id"] = request_id
+            asyncio.run_coroutine_threadsafe(
+                queue.put((event_type, data)),
+                worker_loop,
+            )
+
+        async def runner():
+            nonlocal worker_loop
+            worker_loop = asyncio.get_running_loop()
+            try:
+                import functools
+
+                run_func = functools.partial(
+                    analyze_competitors,
+                    blog_url=request.blog_url,
+                    keyword=request.keyword,
+                    on_progress=lambda stage, message: emit(
+                        "stage",
+                        {
+                            "stage": stage,
+                            "message": message,
+                            "status": "active",
+                        },
+                    ),
+                )
+                try:
+                    result = await asyncio.to_thread(run_func)
+                except ValueError as error:
+                    await queue.put(("error", {
+                        "message": str(error),
+                        "request_id": request_id,
+                    }))
+                except Exception as error:
+                    logger.exception("competitor analysis failed")
+                    await queue.put(("error", {
+                        "message": str(error),
+                        "request_id": request_id,
+                    }))
+                else:
+                    await queue.put(("result", result))
+            finally:
+                await queue.put(("__done__", {"request_id": request_id}))
+
+        task = asyncio.create_task(runner())
+        keepalive_interval = 15.0
+        last_keepalive = time.monotonic()
+
+        try:
+            while True:
+                try:
+                    event_type, data = await asyncio.wait_for(
+                        queue.get(), timeout=0.5
+                    )
+                except asyncio.TimeoutError:
+                    if time.monotonic() - last_keepalive >= keepalive_interval:
+                        last_keepalive = time.monotonic()
+                        yield ": keepalive\n\n"
+                    continue
+
+                if event_type == "__done__":
+                    break
+
+                event_data = json.dumps(data, default=str)
+                yield f"event: {event_type}\ndata: {event_data}\n\n"
+                last_keepalive = time.monotonic()
+
+                if event_type in ("result", "error"):
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/score-article")
+def score_article_endpoint(
+    request: ScoreArticleRequest,
+    _user: dict = Depends(require_auth),
+):
+    from acl_agent.scoring import score_article
+    from acl_agent.validation import count_h1, keyword_count, word_count
+
+    article = request.article.strip()
+    title = (request.title or request.keyword or "Untitled article").strip()
+    if len(title) < 5:
+        title = (title + " draft")[:200]
+    keyword = (request.keyword or title).strip()[:200] or "article"
+    if len(keyword) < 2:
+        keyword = "article"
+    words = word_count(article)
+    brief = ContentBrief(
+        primary_keyword=keyword[:200],
+        title=title[:200],
+        article_angle="Editor scoring of the current draft.",
+        target_word_count=request.target_word_count
+        or max(300, min(8000, words or 1500)),
+        secondary_keywords=[
+            KeywordTarget(phrase=item.strip()[:200], priority="secondary")
+            for item in request.secondary_keywords
+            if item and item.strip()
+        ][:12],
+    )
+    meta_title = (request.meta_title or title)[:70]
+    meta_description = (request.meta_description or "")[:320]
+    if not meta_description:
+        meta_description = re.sub(r"<[^>]+>", " ", article)[:160].strip()
+    seo = SEOAnalysis(
+        primary_keyword=brief.primary_keyword,
+        meta_title=meta_title or title[:70],
+        meta_description=meta_description or title,
+        secondary_keywords=[
+            item.strip() for item in request.secondary_keywords if item.strip()
+        ][:12],
+    )
+    try:
+        scores = score_article(article, brief, seo)
+    except Exception as error:
+        logger.exception("editor scoring failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"message": str(error)},
+        ) from error
+    return {
+        "scores": scores,
+        "stats": {
+            "word_count": words,
+            "h1_count": count_h1(article),
+            "keyword_count": keyword_count(article, brief.primary_keyword),
+        },
+    }
+

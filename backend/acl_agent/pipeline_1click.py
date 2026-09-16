@@ -21,9 +21,10 @@ from acl_agent.config import (
 from acl_agent.auto_brief import analyze_serp, auto_generate_brief
 from acl_agent.generation import extract_outline_from_markdown, generate_single_call_article
 from acl_agent.knowledge_base import retrieve_context
-from acl_agent.models import ContentBrief, SEOAnalysis
+from acl_agent.models import ContentBrief, InternalLink, SEOAnalysis
+from acl_agent.scoring import score_article
 from acl_agent.scraping import scrape_url_for_request
-from acl_agent.validation import validate_article
+from acl_agent.validation import count_h1, keyword_count, word_count
 
 
 def generate_full_pipeline(
@@ -101,13 +102,10 @@ def generate_full_pipeline(
         cannibalization_flags=[],
     )
 
-    validation = validate_article(
+    scores = score_article(
         article=result.article_markdown,
         brief=brief,
-        meta_title=result.meta_title,
-        meta_description=result.meta_description,
-        internal_links=brief.internal_links,
-        reference_text=style_context + "\n\n" + fact_context,
+        seo=seo_analysis,
     )
 
     return {
@@ -115,7 +113,15 @@ def generate_full_pipeline(
         "article": result.article_markdown,
         "outline": extract_outline_from_markdown(result.article_markdown),
         "seo": seo_analysis.model_dump(),
-        "validation": validation,
+        "stats": {
+            "word_count": word_count(result.article_markdown),
+            "h1_count": count_h1(result.article_markdown),
+            "keyword_count": keyword_count(
+                result.article_markdown,
+                brief.primary_keyword,
+            ),
+        },
+        "scores": scores,
         "generation_mode": "single",
     }
 
@@ -123,6 +129,7 @@ def generate_full_pipeline(
 def generate_1click(
     keyword: str,
     title: Optional[str] = None,
+    search_intent: str = "informational",
     size: str = "medium",
     target_word_count: Optional[int] = None,
     article_type: Optional[str] = None,
@@ -142,10 +149,12 @@ def generate_1click(
     include_lists: bool = True,
     include_quotes: bool = False,
     include_italics: bool = False,
-    include_bold: bool = True,
+    include_bold: bool = False,
     hook_type: str = "question",
     hook_brief: Optional[str] = None,
     additional_instructions: str = "",
+    audience: Optional[str] = None,
+    internal_links: Optional[list[InternalLink]] = None,
     on_event: Optional[Callable[[str, dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """
@@ -160,7 +169,8 @@ def generate_1click(
         - brief: ContentBrief used for generation
         - article: generated markdown
         - seo: SEO analysis
-        - validation: validation results
+        - scores: SEO / GEO / AEO score reports
+        - stats: word / heading / keyword counts
     """
     _brand = brand_name or BRAND_NAME
     _site = website or BRAND_SITE
@@ -197,6 +207,7 @@ def generate_1click(
         keyword=keyword,
         serp=serp,
         title=title,
+        search_intent=search_intent,
         size=size,
         target_word_count=target_word_count,
         article_type=article_type,
@@ -219,6 +230,8 @@ def generate_1click(
         additional_instructions=additional_instructions,
         brand_name=_brand,
         website=_site,
+        audience=audience,
+        internal_links=internal_links,
     )
     emit("stage", stage="brief", status="done",
          message=f"Brief ready: '{brief.title}' ({brief.target_word_count} words)",
@@ -273,15 +286,10 @@ def generate_1click(
         extra_fact_context=extra_fact_context,
     )
     emit("stage", stage="draft", status="done",
-         message="Article drafted. Running SEO and validation...")
+         message="Article drafted. Running SEO scoring...")
 
-    # SEO / validation are bundled into the single-call result
     emit("stage", stage="seo", status="done",
-         message="SEO metadata complete")
-    emit("stage", stage="validate", status="running",
-         message="Validating quality, originality, and word count...")
-    emit("stage", stage="validate", status="done",
-         message="Validation complete")
+         message="SEO metadata and scores complete")
 
     # Add SERP data to result
     result["serp"] = {

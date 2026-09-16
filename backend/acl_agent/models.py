@@ -26,9 +26,9 @@ class ProductFact(BaseModel):
 
 
 class InternalLink(BaseModel):
-    anchor_text: str
-    url: str
-    reason: str
+    url: str = Field(min_length=1, max_length=500)
+    anchor_text: str = Field(default="", max_length=200)
+    reason: str = Field(default="", max_length=300)
 
 
 class ContentBrief(BaseModel):
@@ -62,7 +62,13 @@ class ContentBrief(BaseModel):
         max_length=200,
     )
     audience: str = "US consumers"
-    search_intent: str = "informational"
+    search_intent: str = Field(
+        default="informational",
+        description=(
+            "Search intent the article should satisfy: "
+            "informational, commercial, transactional, or navigational."
+        ),
+    )
     article_angle: str = Field(
         min_length=10,
         max_length=1000,
@@ -99,7 +105,7 @@ class ContentBrief(BaseModel):
     include_lists: bool = True
     include_quotes: bool = False
     include_italics: bool = False
-    include_bold: bool = True
+    include_bold: bool = False
 
 
 class OutlineSection(BaseModel):

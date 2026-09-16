@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Editor · Blog Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/workspace.css">
+</head>
+<body class="ws" data-page="editor">
+<div class="workspace">
+  <div class="ws-backdrop" id="ws-backdrop"></div>
+  <div class="ws-col">
+    <header class="ws-topbar">
+      <div style="display:flex;align-items:center;gap:10px">
+        <button type="button" class="ws-menu" id="ws-menu" aria-label="Open navigation">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <nav class="ws-crumb" aria-label="Breadcrumb"><a href="/">Workspace</a> / <strong>Editor</strong></nav>
+      </div>
+      <a class="ws-user-chip" href="/settings">
+        <span class="ws-avatar">AB</span>
+        <span><strong style="display:block;font-size:13px">Avan B</strong><span style="font-size:11px;color:#8a839e">Designer</span></span>
+      </a>
+    </header>
+    <main class="ws-page ed-page">
+      <div class="ed-empty" id="ed-empty">
+        <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        <h2>No article loaded yet</h2>
+        <p>Start from Blog Writer or Blog Rewriter to bring an article here for final editing</p>
+        <a class="btn-new-article" href="/writer">Go to Blog Writer</a>
+      </div>
+
+      <div class="ed-workspace" id="ed-workspace" hidden>
+        <section class="ed-head">
+          <div class="ed-head-copy">
+            <p class="dash-kicker">Final review</p>
+            <h1 id="ed-title" contenteditable="true" spellcheck="true">Untitled article</h1>
+            <p class="ed-status" id="ed-status">Draft · 0 words</p>
+          </div>
+          <div class="ed-head-actions">
+            <button type="button" class="ed-btn-secondary" id="ed-save">Save Draft</button>
+            <button type="button" class="btn-new-article" id="ed-publish">Publish</button>
+          </div>
+        </section>
+
+        <div class="ed-grid">
+          <section class="ca-card ed-editor-card">
+            <div class="ed-toolbar">
+              <button type="button" data-cmd="bold" title="Bold"><strong>B</strong></button>
+              <button type="button" data-cmd="italic" title="Italic"><em>I</em></button>
+              <button type="button" data-block="h2" title="Heading 2">H2</button>
+              <button type="button" data-block="h3" title="Heading 3">H3</button>
+              <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">•</button>
+              <button type="button" data-cmd="insertOrderedList" title="Numbered list">1.</button>
+              <button type="button" data-action="link" title="Link">Link</button>
+              <button type="button" data-block="blockquote" title="Quote">“ ”</button>
+              <button type="button" data-action="table" title="Insert table">Table</button>
+              <button type="button" data-action="image" title="Insert image">Image</button>
+              <span class="ed-save-ind" id="ed-save-ind">Saved</span>
+            </div>
+            <div class="ed-canvas article-body" id="ed-canvas" contenteditable="true" spellcheck="true" role="textbox" aria-label="Article editor"></div>
+          </section>
+
+          <aside class="ca-card ed-side">
+            <div class="tabs" role="tablist">
+              <button class="tab-btn active" role="tab" data-tab="scores" aria-selected="true">Scores</button>
+              <button class="tab-btn" role="tab" data-tab="seo" aria-selected="false">SEO Details</button>
+              <button class="tab-btn" role="tab" data-tab="structure" aria-selected="false">Structure</button>
+              <button class="tab-btn" role="tab" data-tab="checklist" aria-selected="false">Checklist</button>
+            </div>
+
+            <div class="tab-panel active" id="tab-scores" role="tabpanel">
+              <div class="ed-score-list" id="ed-scores"></div>
+              <button type="button" class="ed-btn-secondary ed-recalc" id="ed-recalc">Recalculate scores</button>
+            </div>
+
+            <div class="tab-panel" id="tab-seo" role="tabpanel">
+              <div class="field-group">
+                <label class="field-label" for="ed-seo-title">SEO Title <span id="ed-seo-title-count">0 · ideal 50–60</span></label>
+                <input type="text" id="ed-seo-title" maxlength="80">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="ed-meta">Meta Description <span id="ed-meta-count">0 · ideal 150–160</span></label>
+                <textarea id="ed-meta" rows="4" maxlength="220"></textarea>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="ed-slug">URL Slug</label>
+                <input type="text" id="ed-slug" maxlength="120">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="ed-keyword">Primary Keyword</label>
+                <input type="text" id="ed-keyword" maxlength="200">
+                <p class="field-hint" id="ed-density">Keyword density: —</p>
+              </div>
+              <div class="field-group">
+                <label class="field-label">Secondary Keywords</label>
+                <div class="ed-chips" id="ed-chips"></div>
+                <input type="text" id="ed-chip-input" placeholder="Add a keyword and press Enter" maxlength="80">
+              </div>
+            </div>
+
+            <div class="tab-panel" id="tab-structure" role="tabpanel">
+              <div class="ed-counts" id="ed-counts"></div>
+              <div class="ed-outline" id="ed-outline"></div>
+            </div>
+
+            <div class="tab-panel" id="tab-checklist" role="tabpanel">
+              <ul class="ed-check" id="ed-check"></ul>
+            </div>
+          </aside>
+        </div>
+
+        <section class="ca-card ed-history">
+          <button type="button" class="ed-history-toggle" id="ed-history-toggle" aria-expanded="false">
+            <span>Version History</span>
+            <span class="ed-history-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="ed-history-body" id="ed-history-body" hidden>
+            <p class="ed-empty-mini" id="ed-history-empty">No saved versions yet.</p>
+            <ul id="ed-history-list"></ul>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="/assets/workspace.js"></script>
+<script src="/assets/editor.js"></script>
+</body>
+</html>

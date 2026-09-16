@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Log in · Blog Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/workspace.css">
+</head>
+<body class="ws auth-page" data-page="login">
+  <main class="auth-shell">
+    <section class="auth-card" aria-labelledby="auth-title">
+      <a href="/login" class="ws-logo auth-logo">
+        <span class="ws-logo-mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M4 7.5L12 3l8 4.5v9L12 21l-8-4.5v-9z" stroke="currentColor" stroke-width="2"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" stroke="currentColor" stroke-width="2"/></svg>
+        </span>
+        <span class="ws-logo-text">Blog Agent</span>
+      </a>
+      <p class="dash-kicker" id="auth-kicker">Welcome back</p>
+      <h1 id="auth-title">Log in to your workspace</h1>
+      <p class="auth-lead" id="auth-lead">Use your name and password to continue writing.</p>
+
+      <div class="tabs auth-tabs" role="tablist">
+        <button type="button" class="tab-btn active" role="tab" data-mode="login" aria-selected="true">Log in</button>
+        <button type="button" class="tab-btn" role="tab" data-mode="signup" aria-selected="false">Create account</button>
+      </div>
+
+      <form id="auth-form" class="auth-form" novalidate>
+        <div class="field-group">
+          <label class="field-label" for="auth-name">Name</label>
+          <input type="text" id="auth-name" name="name" autocomplete="username" required maxlength="100" placeholder="Your name">
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="auth-password">Password</label>
+          <input type="password" id="auth-password" name="password" autocomplete="current-password" required minlength="4" maxlength="200" placeholder="At least 4 characters">
+        </div>
+        <p class="auth-error" id="auth-error" hidden></p>
+        <button type="submit" class="btn-new-article auth-submit" id="auth-submit">Log in</button>
+      </form>
+    </section>
+  </main>
+<script src="/assets/workspace.js"></script>
+<script src="/assets/auth.js"></script>
+</body>
+</html>

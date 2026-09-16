@@ -34,20 +34,23 @@ def word_count_band(target_word_count: int) -> tuple[int, int]:
     return target_word_count - spread, target_word_count + spread
 
 def count_h1(text: str) -> int:
-    return len(
+    markdown = len(
         re.findall(
             r"^#\s+.+$",
             text,
             flags=re.MULTILINE,
         )
     )
+    html = len(re.findall(r"<h1\b[^>]*>", text, flags=re.IGNORECASE))
+    return markdown + html
 
 
 def word_count(text: str) -> int:
+    visible = re.sub(r"<[^>]+>", " ", text)
     return len(
         re.findall(
             r"\S+",
-            text,
+            visible,
         )
     )
 
@@ -245,8 +248,7 @@ def humanization_checks(text: str) -> dict[str, Any]:
     metrics["filler_phrase_count"] = filler_count
     if filler_count > HUMANIZATION_MAX_FILLER_COUNT:
         warnings.append(
-            f"AI-ism filler phrases detected ({filler_count}): "
-            "may hurt perceived humanization."
+            f"Stock filler phrases detected ({filler_count})."
         )
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -282,33 +284,8 @@ def humanization_checks(text: str) -> dict[str, Any]:
                 "Vary openings for natural rhythm."
             )
 
-    personal_observation_patterns = [
-        r"most people don't realize",
-        r"here'?s? the thing",
-        r"the honest answer",
-        r"here'?s? what most",
-        r"the catch is",
-        r"it depends",
-        r"no single right answer",
-    ]
-    has_depth_signal = any(
-        re.search(p, text.lower()) for p in personal_observation_patterns
-    )
-    metrics["has_depth_signal"] = has_depth_signal
-    if not has_depth_signal:
-        warnings.append(
-            "No depth signals found (uncertainty acknowledgment, "
-            "trade-off mention, or personal observation). Add at "
-            "least one to feel more human."
-        )
-
     dash_count = text.count(" - ") + text.count("\u2014")
     metrics["em_dash_count"] = dash_count
-    if dash_count == 0:
-        warnings.append(
-            "No em dashes or parenthetical asides found. Humans "
-            "use these to break flow naturally."
-        )
 
     return {"warnings": warnings, "metrics": metrics}
 
@@ -399,7 +376,7 @@ def validate_article(
     if originality_issue:
         warnings.append(originality_issue)
 
-    errors.extend(
+    warnings.extend(
         validate_internal_links(
             internal_links,
             brief.website,

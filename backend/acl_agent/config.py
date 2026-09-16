@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from huggingface_hub import InferenceClient
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -25,11 +24,21 @@ load_dotenv(ENV_PATH)
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-HF_API_KEY = os.getenv("HF_API_KEY")
-MODEL = os.getenv(
-    "MODEL",
-    "zai-org/GLM-4.6",
-)
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+HF_API_KEY = (os.getenv("HF_API_KEY") or "").strip()
+
+if OPENAI_API_KEY:
+    LLM_PROVIDER = "openai"
+    _default_model = "gpt-4o"
+elif HF_API_KEY:
+    LLM_PROVIDER = "huggingface"
+    _default_model = "meta-llama/Llama-3.1-8B-Instruct"
+else:
+    raise RuntimeError(
+        "No generation API key found. Add OPENAI_API_KEY or HF_API_KEY to .env."
+    )
+
+MODEL = os.getenv("MODEL", _default_model)
 
 BRAND_NAME = os.getenv("BRAND_NAME", "")
 
@@ -128,11 +137,6 @@ SERP_RESULTS_COUNT = int(
     os.getenv("SERP_RESULTS_COUNT", "5")
 )
 
-if not HF_API_KEY:
-    raise RuntimeError(
-        "HF_API_KEY is missing. Add it to .env."
-    )
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -140,6 +144,17 @@ logging.basicConfig(
 
 logger = logging.getLogger("acl-blog-agent")
 
-client = InferenceClient(
-    api_key=HF_API_KEY,
+if LLM_PROVIDER == "openai":
+    from openai import OpenAI
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    from huggingface_hub import InferenceClient
+
+    client = InferenceClient(api_key=HF_API_KEY)
+
+logger.info(
+    "Generation provider: %s (model=%s)",
+    LLM_PROVIDER,
+    MODEL,
 )

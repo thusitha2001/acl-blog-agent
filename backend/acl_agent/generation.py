@@ -1,8 +1,8 @@
 ﻿"""
 ACL Blog Agent - article generation (single-call).
 
-Holds the single-call prompt strings (editorial voice,
-humanization, SEO) and the generation logic that uses them.
+Holds the single-call prompt strings (editorial voice and SEO)
+and the generation logic that uses them.
 
 generate_single_call_article() produces the complete article - draft,
 structure, and SEO metadata - from a single model API call.
@@ -23,7 +23,6 @@ from acl_agent.models import (
 from acl_agent.validation import (
     check_originality,
     count_h1,
-    humanization_checks,
     keyword_count,
     word_count,
     word_count_band,
@@ -34,183 +33,103 @@ def brand_writing_style(brand_name: str) -> str:
     return f"""
 {brand_name} EDITORIAL STYLE
 
-VOICE
-- Warm, practical, knowledgeable, and conversational.
-- Premium but never pretentious.
-- Helpful rather than aggressively sales-focused.
-- Write for real customers using clear American English.
-- Use concrete examples relevant to the brand's product or service
-  category when relevant.
+Write for one real reader who has a specific problem or decision.
+Sound like a working editor at {brand_name}, not a content mill.
 
-TONE
-- Professional but approachable.
-- Educational and editorial.
-- Confident without unsupported absolute claims.
-- Avoid exaggerated marketing claims.
-- Avoid generic lifestyle-copy language.
+VOICE
+- Warm, practical, and conversational without being sloppy.
+- Helpful rather than salesy.
+- Clear American English unless the brief asks otherwise.
+- Use examples that fit the brand's actual products or category
+  when the brief supports them.
+
+TONE AND AUDIENCE
+- Honor the brief's tone, audience, point of view, readability,
+  search intent, and brand voice exactly.
+- Match search_intent in the brief:
+  informational = teach and explain; commercial = compare options
+  before a purchase; transactional = help the reader complete an
+  action; navigational = help them find a specific brand, page,
+  or product.
+- Professional quality with contractions where they fit:
+  you're, it's, don't, you'll, that's, can't, won't.
+- Prefer simple words: use, help, show, need, start, buy, fix.
+- No promotional hype, stacked adjectives, or exaggerated claims.
 
 PRODUCT MENTIONS
-- Mention products or services only when they naturally support the topic.
-- Explain why a feature, material, or characteristic matters.
-- Never force products into a paragraph for SEO.
-- Never invent product specifications or certifications.
-
-SEO STYLE
-- Use the primary keyword naturally.
-- Use related terms only when they help the reader.
-- Do not keyword-stuff.
-- Answer likely reader questions directly.
+- Mention products or services only when they naturally help.
+- Explain why a feature or material matters in practice.
+- Never force a product in for SEO.
+- Never invent specs, certifications, quotes, or testimonials.
 """
 
 
-NATURAL_EDITORIAL_STYLE = """
-NATURAL EDITORIAL WRITING PROFILE
+HUMAN_EDITORIAL_VOICE = """
+WRITE THE FINAL ARTICLE DIRECTLY
 
-Write for one real reader with a specific problem or decision.
+Do not produce a generic first draft and then dress it up.
+Write the publish-ready piece in one pass, in a natural
+editorial voice a magazine or brand blog would actually run.
 
-OPENING
-- Start with the reader's situation, hesitation, or question.
-- Give the useful point early.
-- Do not begin with a dictionary definition.
-- Avoid "In today's world", "When it comes to", and
-  "Whether you're" unless the phrase is genuinely necessary.
+HUMAN WRITING STYLE
+- Write for real readers, not search engines.
+- Vary sentence length and structure. Mix short lines with
+  longer ones. Do not let three sentences in a row share
+  the same shape.
+- Vary paragraph length. Some paragraphs can be one sentence.
+  Others can run a few sentences. Do not make every section
+  the same length or follow the same mini-template.
+- Do not start every paragraph with a topic sentence, then
+  explanation, then wrap-up.
+- Use meaning-based transitions. Skip stock connectors like
+  Furthermore, Moreover, Additionally, However, and Therefore
+  unless the sentence truly needs that word.
+- Conversational where it fits; still edited and professional.
+- Specific examples, practical observations, and useful detail
+  instead of generic statements.
+- Cut filler. If a sentence adds no new information, delete it.
+- Do not repeat the same point in different words.
+- Do not invent statistics, research, quotes, testimonials,
+  personal experiences, or facts.
+- Do not copy or closely imitate competitor wording from the
+  SERP notes or style references.
+- Do not force keywords. Use the primary keyword and related
+  terms only where they sound like something a person would say.
+- Do not keyword-stuff or repeat the main phrase in every section.
+- Do not add fake spelling mistakes, awkward grammar, or
+  random punctuation to seem "human."
+- Do not mention AI, AI detection, detectors, or any writing
+  process in the article.
 
-PARAGRAPHS
-- Keep most paragraphs focused on one useful idea.
-- Mix one-sentence paragraphs with paragraphs of two to four sentences.
-- Do not make every section the same length.
-- Avoid predictable paragraph formulas.
+AVOID THESE PHRASES unless they truly belong
+In today's world; When it comes to; Whether you're;
+It's important to note; It's worth mentioning; Let's dive in;
+Let's explore; In conclusion; Overall; To summarize;
+In this article we will; Without further ado; Look no further;
+This comprehensive guide; the world of; the realm of;
+not only...but also.
 
-RHYTHM
-- Mix short, medium, and occasional longer sentences.
-- Use contractions naturally.
-- Avoid repetitive sentence openings.
-- Avoid mechanically symmetrical lists.
-- Prefer plain, specific language over corporate wording.
+NATURALNESS CHECK (silent — never describe this in the article)
+Before keeping a sentence, ask: would an experienced editor
+publish this as-is? If it sounds templated, predictable,
+repetitive, overly polished, or robotic, rewrite it now.
 
-EDITORIAL JUDGMENT
-- Explain what matters most.
-- Tell the reader what can be skipped.
-- Mention realistic constraints and trade-offs.
-- Give practical rules of thumb.
-- Use concrete examples.
-- Do not invent personal experiences.
+SEO, AEO, AND GEO — WITHOUT SOUNDING LIKE SEO
+- Keep the piece easy to find and easy to quote, but never
+  sacrifice the writing to hit a keyword quota.
+- Use the primary keyword naturally, especially near the
+  opening if it fits.
+- Answer the reader's real questions directly (AEO): a clear
+  answer first, then the useful extra.
+- Include specific terminology, named things, places, and
+  context from the brief or verified facts when they help
+  (GEO). Do not invent entities.
+- Do not write a sentence whose only job is to satisfy a
+  search engine.
 
-SPECIFICITY
-- Replace vague advice with observable actions.
-- Explain why a recommendation matters.
-- Include examples, use cases, or decisions where appropriate.
-- Do not invent statistics, studies, certifications, or product claims.
-
-ENDING
-- End with a useful next step or a calm editorial takeaway.
-- Do not add a generic summary.
-- Do not use "In conclusion", "Overall", or
-  "To summarize".
-
-The final article should feel edited, not regenerated.
-"""
-
-
-HUMANIZATION_VOICE = """
-HUMANIZATION - NON-NEGOTIABLE
-
-Write as if you are a real person who knows this topic, not a model
-producing content on demand. The article must pass AI detectors.
-
-VOICE
-- Write in second person ("you") with occasional first person ("I",
-  "we") to create a conversational, direct-address feel.
-- Include 2-3 casual asides per article using em dashes or parentheses:
-  "Linen wrinkles easily — honestly, that's part of the charm."
-- Ask the reader a rhetorical question at least twice in the article.
-- Use at least one sentence that starts with "But" or "And" to mimic
-  how humans actually write.
-- Include one moment of mild opinion or preference:
-  "I'd pick the mid-weight version every time."
-- Use at least one short declarative sentence that stands alone as
-  its own paragraph for emphasis.
-
-SENTENCE RHYTHM
-- Alternate short punchy sentences with longer flowing ones.
-- Never let three consecutive sentences share the same structure.
-- Vary sentence openings: question, prepositional phrase, dependent
-  clause, name, number, gerund, or imperative — at least once per
-  section.
-- Include one sentence under 8 words per section.
-- Include at least one sentence over 30 words per section to create
-  rhythm contrast.
-- Start at least two sentences per section with a subordinating
-  conjunction: "Although...", "Since...", "While...", "Because...".
-
-PARAGRAPH SHAPE
-- Mix 1-sentence paragraphs with 3-5 sentence paragraphs.
-- No two consecutive paragraphs should have similar word counts.
-- Use an em dash or parenthetical aside at least once per article
-  to mimic how humans interrupt their own thought.
-- Include one brief personal-style observation per section:
-  "Most people don't realize...", "Here's the thing...",
-  "The honest answer is...", "What nobody tells you...",
-  "I've seen this mistake a hundred times..."
-
-VOCABULARY
-- Use contractions naturally: don't, it's, you'll, that's, can't,
-  won't, shouldn't, we're, they're, you've, let's, isn't, doesn't.
-- Prefer plain words: "use" not "utilize", "help" not "facilitate",
-  "show" not "demonstrate", "need" not "require", "start" not
-  "commence", "buy" not "acquire", "fix" not "remediate".
-- Never use: "delve into", "realm", "tapestry", "embark",
-  "landscape" as metaphor, "moreover", "furthermore",
-  "in this blog post", "it goes without saying", "leveraging",
-  "synergy", "holistic", "seamless", "robust", "unlock",
-  "empower", "navigate", "shed light", "game-changer",
-  "at the end of the day", "in a nutshell", "rest assured",
-  "dive deep", "tap into", " shed light on", " underscore ".
-
-TRANSITIONS
-- Never start consecutive paragraphs with "Additionally" or "Also".
-- Use causal transitions at least twice: "Because...", "That means...",
-  "So...", "As a result..."
-- Use contrast at least once: "But here's what most people miss..."
-- Start one paragraph mid-thought to break the linear flow:
-  "...and that's where most people go wrong."
-
-SPECIFICITY
-- Include one concrete number, measurement, or time frame per section.
-- Reference a real scenario, not a hypothetical one.
-- Name a specific product, material, or technique when the brief
-  provides product_facts or required_topics.
-- Avoid vague superlatives ("the best", "amazing", "incredible")
-  unless qualified with a reason.
-
-DEPTH SIGNALS - what separates human writing from AI
-- Acknowledge uncertainty or trade-offs honestly:
-  "This works for most people, though not everyone",
-  "There's no single right answer here".
-- Disagree with or qualify a common assumption at least once.
-- Give the reader permission to make a different choice:
-  "If you prefer X, that works too".
-- End sections with a thought, not a summary.
-- Include one "real talk" moment per article — a blunt, no-BS
-  sentence that cuts through the usual advice:
-  "Honestly, most of those lists are recycled garbage."
-
-BANNED AI PATTERNS
-- No "In today's world", "When it comes to", "Whether you're".
-- No "It's important to note", "It's worth mentioning".
-- No "In this article, we will explore...".
-- No "Let's dive in", "Let's explore", "Without further ado".
-- No "Sit back and relax".
-- No "So, what are you waiting for?".
-- No "Look no further", "Look no further than".
-- No "If you're looking for...", "If you've ever wondered...".
-- No "we'll cover", "we'll explore", "we'll discuss".
-- No "the world of", "the realm of".
-- No "not only...but also" constructions.
-- No parallel triads: avoid three-part lists where all items
-  share the same grammatical structure ("X, Y, and Z" with
-  matching verb forms).
-- No sentences that begin with "This comprehensive guide".
+QUALITY BAR
+Original, natural, specific, useful, factually careful,
+and ready to publish.
 """
 
 
@@ -221,14 +140,13 @@ def single_call_system_prompt(
     max_words: int,
 ) -> str:
     return f"""
-You are the senior editorial writer and SEO editor for {brand_name},
-producing a complete, publish-ready article in a single response.
+You are a senior editorial writer for {brand_name}.
+Write the finished, publish-ready article in one response.
+Do not draft, then rewrite. Do not discuss process.
 
 {brand_writing_style(brand_name)}
 
-{NATURAL_EDITORIAL_STYLE}
-
-{HUMANIZATION_VOICE}
+{HUMAN_EDITORIAL_VOICE}
 
 ORIGINALITY - NON-NEGOTIABLE
 - Every sentence must be written entirely in your own words.
@@ -242,35 +160,52 @@ ORIGINALITY - NON-NEGOTIABLE
   recognize as new, not a rewrite of existing material.
 
 '''STRUCTURE - REQUIRED
-- Exactly one H1 (the article title), using Markdown "# ".
-- 4-8 H2 sections using Markdown "## ", each covering one required
+- Exactly one H1 title using an HTML <h1> tag.
+- 4-8 H2 sections using HTML <h2> tags, each covering one required
   topic or a distinct angle on the primary keyword.
-- H3 (###) SUBHEADINGS ARE FORBIDDEN unless the CONTENT BRIEF's
+- H3 (<h3>) SUBHEADINGS ARE FORBIDDEN unless the CONTENT BRIEF's
   additional_instructions explicitly requests them. Never create
   H3s on your own. Use only H2 sections unless explicitly told
   otherwise.
 - The CONTENT BRIEF below includes FORMATTING REQUIREMENTS in its
   additional_instructions field. Follow ALL of them exactly:
-  if it says use H3, use H3; if it says use tables, use Markdown
-  tables with | pipe syntax; if it says use lists, use lists;
-  if it says use blockquotes, use blockquotes; if it says use
-  italics or bold, use them throughout the article.
-- MARKDOWN SYNTAX — STRICT: Lists MUST use "- item" or "* item"
-  syntax (never HTML <ul><li>). Tables MUST use the pipe syntax:
-  | header1 | header2 | with a separator row |---|---| on the
-  next line. Do NOT use HTML tags for lists or tables. Do NOT
-  mix different list markers in the same list. Every list item
-  must start with "- " or "* ". Do NOT use numbered lists unless
-  the brief explicitly requests them.
-- When tables are requested, include at least one Markdown table
-  (| col1 | col2 | format) with a header row and separator row.
-  Place it in the most relevant section. Tables are REQUIRED when
-  the brief asks for them — do not skip them.
+  if it says use H3, use H3; if it says use tables, use HTML
+  <table> markup; if it says use lists, use lists.
+
+PUBLISH FORMAT — NON-NEGOTIABLE
+The article must be completely ready to paste onto a website.
+Output clean HTML only. No markdown. No commentary.
+
+Allowed tags: h1, h2, h3, p, ul, ol, li, a, table, thead, tbody,
+tr, th, td, blockquote.
+
+- Wrap every paragraph in <p>. Separate headings, paragraphs, and
+  lists with a blank line.
+- Numbered lists (<ol><li>) for steps, instructions, or processes.
+  One step per <li>. Never combine 1. 2. 3. into a single paragraph.
+- Bullet lists (<ul><li>) for features, tips, or grouped items.
+  One item per <li>. Keep each list item on its own line.
+- Internal links as <a href="url">anchor text</a>. Do not invent
+  extra URLs. Do not dump links in a list at the end.
+- Tables (when requested) as HTML <table> with <thead> and <tbody>.
+- NEVER use *, **, _, #, -, or other markdown symbols for styling.
+- NEVER use <strong>, <b>, <em>, <i>, <u>, or underline.
+- NEVER wrap the article in markdown fences or add notes about
+  formatting. Return only the article HTML inside article_markdown.
+
 - Each section must have at least two full paragraphs - no single
   sentence "sections" and no bullet-only sections standing in for
   real explanation.
 - Do not skip any topic listed in required_topics in the brief.
-- Answer the reader's main question within the first 150 words.
+- Answer the reader's main question within the first 150 words
+  with a direct, quotable statement an AI overview could cite.
+- Prefer some H2s framed as questions readers actually ask.
+- Follow each H2 with a 1-2 sentence direct answer before expanding.
+- Write for the TARGET AUDIENCE in the content brief: examples,
+  vocabulary, and decision criteria must match that reader.
+- If the brief includes internal_links, weave EACH one into the
+  article as <a href="url">anchor text</a> where it naturally
+  helps the reader.
 - End the final section with a concrete, useful next step - not a
   heading called "Conclusion" and not a generic summary paragraph.
 
@@ -316,7 +251,7 @@ key, no markdown fences, no commentary before or after the JSON):
 
 {{
   "h1": "string - the article title, matching the H1 in article_markdown",
-  "article_markdown": "string - the FULL article in Markdown, starting with the H1 line, including all H2/H3 sections, as one string with \\n for line breaks",
+  "article_markdown": "string - the FULL article as clean publish-ready HTML (h1, h2, p, ul/ol/li), no markdown, no commentary, with \\n for line breaks",
   "meta_title": "string - under 60 characters",
   "meta_description": "string - under 155 characters",
   "faqs": [
@@ -354,8 +289,8 @@ STYLE REFERENCES (tone/voice only - do not copy or paraphrase)
 VERIFIED FACTS (facts only - do not copy phrasing)
 {fact_context}
 
-Write the complete article and return it in the required JSON
-schema.
+Write the complete, final article and return it in the required JSON
+schema. Do not include notes about writing style, SEO, or process.
 """
 
     minimum_words, maximum_words = word_count_band(
@@ -370,7 +305,7 @@ schema.
         if count_h1(article) != 1:
             return (
                 "the article must contain exactly one H1 heading "
-                "(a single line starting with '# ')"
+                "(use a single <h1> title)"
             )
 
         # Word count — min_words/max_words were computed and put in
@@ -399,68 +334,66 @@ schema.
         # (just as important) actually present when they did ask -
         # the brief's include_h3/include_tables/include_lists flags
         # come straight from the request, not the model's own output.
-        h3_matches = re.findall(r"^###\s+.+$", article, flags=re.MULTILINE)
+        h3_matches = re.findall(
+            r"(?:^###\s+.+$|<h3\b[^>]*>)",
+            article,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
 
         if not brief.include_h3:
             if h3_matches:
                 return (
-                    "H3 subheadings (###) are not allowed in this "
-                    "article. Use only H2 (##) sections. Remove "
-                    "all H3 headings."
+                    "H3 subheadings are not allowed in this article. "
+                    "Use only H2 sections. Remove all H3 headings."
                 )
         elif not h3_matches:
             issues.append(
                 "the user requested H3 subheadings but the article "
-                "has none. Add H3 (###) subheadings nested under at "
+                "has none. Add H3 subheadings nested under at "
                 "least some of the H2 sections."
             )
 
         if brief.include_tables:
             has_table = bool(re.search(
-                r"\|[\s:-]*-{2,}[\s:-]*\|", article
+                r"(?:\|[\s:-]*-{2,}[\s:-]*\||<table\b)",
+                article,
+                flags=re.IGNORECASE,
             ))
             if not has_table:
                 issues.append(
                     "the user requested at least one comparison "
-                    "table but the article has none. Add a Markdown "
-                    "table (| col1 | col2 | header row, then a "
-                    "|---|---| separator row) in the most relevant "
-                    "section."
+                    "table but the article has none. Add an HTML "
+                    "<table> in the most relevant section."
                 )
 
         if brief.include_lists:
             has_list = bool(re.search(
-                r"^\s*(?:[-*]|\d+\.)\s+\S", article, flags=re.MULTILINE
+                r"(?:^\s*(?:[-*]|\d+\.)\s+\S|<(?:ul|ol)\b)",
+                article,
+                flags=re.MULTILINE | re.IGNORECASE,
             ))
             if not has_list:
                 issues.append(
-                    "the user requested bulleted/numbered lists but "
-                    "the article has none. Add at least one Markdown "
-                    "list ('- item' or '1. item') where it aids "
-                    "scannability."
+                    "the user requested lists but the article has "
+                    "none. Use <ol> for steps and <ul> for tips "
+                    "or features, with one item per <li>."
                 )
 
-        # Markdown rendering — lists must use - or *, tables use |
-        for line in article.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("<ul") or stripped.startswith("<li") \
-                    or stripped.startswith("<ol") or "<li>" in stripped:
-                issues.append(
-                    "HTML list tags (<ul>, <li>, <ol>) are not "
-                    "allowed. Use Markdown '- item' or '* item'."
-                )
-            if stripped.startswith("<table") or "<td>" in stripped \
-                    or "<tr>" in stripped:
-                issues.append(
-                    "HTML table tags are not allowed. Use "
-                    "Markdown pipe tables (| col | col |)."
-                )
+        if re.search(r"\*\*[^*]+\*\*|__[^_]+__", article):
+            issues.append(
+                "do not use asterisks, underscores, bold, or italic "
+                "markup. Write plain HTML with h1/h2/p/ul/ol only."
+            )
 
         # Repetition — keyword must not dominate any single section
         kw = brief.primary_keyword
         kw_count = keyword_count(article, kw)
         if kw_count > 0:
-            sections = re.split(r"^##\s+.+$", article, flags=re.MULTILINE)
+            sections = re.split(
+                r"(?:^##\s+.+$|<h2\b[^>]*>.*?</h2>)",
+                article,
+                flags=re.MULTILINE | re.IGNORECASE | re.DOTALL,
+            )
             for section in sections:
                 section_count = keyword_count(section, kw)
                 section_words = max(len(section.split()), 1)
@@ -501,27 +434,27 @@ schema.
                 )
                 break
 
-        # Humanization — the HUMANIZATION_VOICE prompt block asks for
-        # contractions, varied rhythm, depth signals, em dashes, etc.,
-        # but until now nothing ever checked whether the model actually
-        # did any of it (humanization_checks() existed but was only
-        # wired into the post-hoc report, never the retry loop) - so
-        # it was the one instruction block with zero consequence for
-        # ignoring it. Only reject on a strong multi-signal "reads
-        # like AI" pattern (3+ simultaneous failures) rather than any
-        # single metric, since this already competes with several
-        # other hard constraints for the model's attention within a
-        # few retries.
-        humanization = humanization_checks(article)
-        if len(humanization["warnings"]) >= 3:
+        filler_hits = sum(
+            1 for phrase in (
+                "in today's world",
+                "when it comes to",
+                "it's important to note",
+                "it's worth mentioning",
+                "let's dive in",
+                "let's explore",
+                "in conclusion",
+                "without further ado",
+                "this comprehensive guide",
+                "in this article",
+                "look no further",
+            )
+            if phrase in article_lower
+        )
+        if filler_hits >= 2:
             issues.append(
-                "the writing reads too AI-generated/robotic ("
-                + " ".join(humanization["warnings"])
-                + "). Rewrite with natural contractions, varied "
-                "sentence lengths, at least one em dash or "
-                "parenthetical aside, and one honest depth signal "
-                "(an acknowledged trade-off or uncertainty) - without "
-                "changing the facts or structure."
+                "the prose uses stock filler phrases. Rewrite those "
+                "sentences in plain editorial language. Do not add "
+                "notes about writing style."
             )
 
         if issues:
@@ -559,7 +492,7 @@ schema.
         ),
         prompt,
         SingleCallArticle,
-        temperature=0.65,
+        temperature=0.72,
         max_tokens=max_tokens,
         # 3 retries (4 attempts total): extra_validate now stacks
         # several hard requirements at once (word count band, H3s,
@@ -572,33 +505,54 @@ schema.
 
 def extract_outline_from_markdown(article_markdown: str) -> dict[str, Any]:
     """
-    Reconstructs a lightweight outline (for the API response's
-    "outline" field) by reading headings back out of the generated
-    Markdown, since single-call mode doesn't produce a separate
-    outline object.
+    Reconstructs a lightweight outline from HTML or Markdown headings.
     """
     h1_match = re.search(
-        r"^#\s+(.+)$",
+        r"<h1\b[^>]*>(.*?)</h1>",
         article_markdown,
-        flags=re.MULTILINE,
+        flags=re.IGNORECASE | re.DOTALL,
     )
+    if not h1_match:
+        h1_match = re.search(
+            r"^#\s+(.+)$",
+            article_markdown,
+            flags=re.MULTILINE,
+        )
+
+    def _clean_heading(value: str) -> str:
+        return re.sub(r"<[^>]+>", "", value).strip()
+
+    h1 = _clean_heading(h1_match.group(1)) if h1_match else ""
 
     sections = []
 
     for match in re.finditer(
-        r"^(##|###)\s+(.+)$",
+        r"<h([23])\b[^>]*>(.*?)</h\1>",
         article_markdown,
-        flags=re.MULTILINE,
+        flags=re.IGNORECASE | re.DOTALL,
     ):
-        level = 2 if match.group(1) == "##" else 3
         sections.append(
             {
-                "heading": match.group(2).strip(),
-                "level": level,
+                "heading": _clean_heading(match.group(2)),
+                "level": int(match.group(1)),
             }
         )
 
+    if not sections:
+        for match in re.finditer(
+            r"^(##|###)\s+(.+)$",
+            article_markdown,
+            flags=re.MULTILINE,
+        ):
+            level = 2 if match.group(1) == "##" else 3
+            sections.append(
+                {
+                    "heading": match.group(2).strip(),
+                    "level": level,
+                }
+            )
+
     return {
-        "h1": h1_match.group(1).strip() if h1_match else "",
+        "h1": h1,
         "sections": sections,
     }

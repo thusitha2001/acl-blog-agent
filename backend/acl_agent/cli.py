@@ -98,7 +98,8 @@ def command_generate(input_path: str):
             {
                 "json_output": str(output_path),
                 "markdown_output": str(article_path),
-                "validation": result["validation"],
+                "stats": result.get("stats"),
+                "scores": result.get("scores"),
             },
             indent=2,
         )
@@ -159,24 +160,24 @@ def command_quick(
     )
 
     # Print summary
-    validation = result.get("validation", {})
     seo = result.get("seo", {})
     serp = result.get("serp", {})
 
     output = {
         "title": seo.get("meta_title", ""),
-        "word_count": validation.get("word_count", 0),
-        "validation_passed": validation.get(
-            "passed", False
-        ),
-        "errors": len(validation.get("errors", [])),
-        "warnings": len(validation.get("warnings", [])),
+        "word_count": (result.get("stats") or {}).get("word_count", 0),
         "nlp_keywords_found": len(
             serp.get("nlp_keywords", [])
         ),
         "secondary_keywords": len(
             seo.get("secondary_keywords", [])
         ),
+        "scores": {
+            "seo": (result.get("scores") or {}).get("seo", {}).get("score"),
+            "geo": (result.get("scores") or {}).get("geo", {}).get("score"),
+            "aeo": (result.get("scores") or {}).get("aeo", {}).get("score"),
+            "overall": (result.get("scores") or {}).get("overall"),
+        },
         "json_output": str(json_path),
         "markdown_output": str(article_path),
     }

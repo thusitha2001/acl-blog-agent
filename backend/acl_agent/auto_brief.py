@@ -248,11 +248,11 @@ def extract_headings_from_snippets(
         # Extract capitalized phrases from snippets
         snippet = result.snippet
         phrases = re.findall(
-            r"(?:^|\.\s+)([A-Z][^.!?]{15,80})",
+            r"(?:^|\.\s+)([A-Z][^.!?]{15,120}[.!?])",
             snippet,
         )
         for phrase in phrases:
-            cleaned = phrase.strip().rstrip(".")
+            cleaned = phrase.strip()
             if (
                 cleaned
                 and cleaned not in headings
@@ -388,6 +388,7 @@ def auto_generate_brief(
     keyword: str,
     serp: SERPAnalysis,
     title: Optional[str] = None,
+    search_intent: str = "informational",
     size: str = "medium",
     target_word_count: Optional[int] = None,
     article_type: Optional[str] = None,
@@ -404,12 +405,14 @@ def auto_generate_brief(
     include_lists: bool = True,
     include_quotes: bool = False,
     include_italics: bool = False,
-    include_bold: bool = True,
+    include_bold: bool = False,
     hook_type: str = "question",
     hook_brief: Optional[str] = None,
     additional_instructions: str = "",
     brand_name: str = BRAND_NAME,
     website: str = BRAND_SITE,
+    audience: Optional[str] = None,
+    internal_links: Optional[list[InternalLink]] = None,
 ) -> ContentBrief:
     """
     Generate a complete ContentBrief from SERP data and user
@@ -455,6 +458,34 @@ def auto_generate_brief(
             f"ARTICLE TYPE: {type_map.get(article_type, article_type)}\n"
         )
 
+    intent_map = {
+        "informational": (
+            "The reader wants to learn. Explain, teach, and answer "
+            "questions. Do not push a purchase."
+        ),
+        "commercial": (
+            "The reader is comparing options before buying. Cover "
+            "criteria, trade-offs, and a clear recommendation."
+        ),
+        "transactional": (
+            "The reader is ready to act. Be direct, include next "
+            "steps, and a clear call to action."
+        ),
+        "navigational": (
+            "The reader is looking for a specific brand, page, or "
+            "product. Help them find it quickly with clear "
+            "identification and relevant links."
+        ),
+    }
+    resolved_intent = (search_intent or "informational").strip().lower()
+    if resolved_intent not in intent_map:
+        resolved_intent = "informational"
+    search_intent_instruction = (
+        f"SEARCH INTENT: {resolved_intent}. "
+        f"{intent_map[resolved_intent]} "
+        f'Set the "search_intent" field to exactly "{resolved_intent}".\n'
+    )
+
     # Build POV context
     pov_instruction = ""
     if point_of_view:
@@ -493,6 +524,27 @@ def auto_generate_brief(
             f"{brand_voice}\n"
         )
 
+    audience_instruction = ""
+    if audience:
+        audience_instruction = (
+            f'TARGET AUDIENCE (use this exactly in the "audience" field): '
+            f"{audience}\n"
+        )
+
+    user_links_instruction = ""
+    if internal_links:
+        link_lines = "\n".join(
+            f'- {link.anchor_text}: {link.url}'
+            + (f" ({link.reason})" if link.reason else "")
+            for link in internal_links
+        )
+        user_links_instruction = (
+            "USER-PROVIDED INTERNAL LINKS — use these EXACTLY in "
+            "the internal_links field. Do not invent, replace, or "
+            "omit them:\n"
+            f"{link_lines}\n"
+        )
+
     # Build structure context
     structure_notes = []
     if include_faq:
@@ -518,20 +570,22 @@ def auto_generate_brief(
     formatting_notes = []
     if include_tables:
         formatting_notes.append(
-            "Include at least one comparison table in Markdown format "
-            "(| col1 | col2 |) with header row and separator row. "
-            "Tables are REQUIRED — do not skip this."
+            "Include at least one HTML comparison table "
+            "(<table> with header row). Tables are REQUIRED — "
+            "do not skip this."
         )
     if include_h3:
         formatting_notes.append("Use H3 subheadings under H2 sections")
     if include_lists:
-        formatting_notes.append("Use bulleted/numbered lists for scannability")
+        formatting_notes.append(
+            "Use numbered lists for steps and bullet lists for "
+            "features or tips. One item per line. No markdown "
+            "asterisks or bold/italic."
+        )
     if include_quotes:
-        formatting_notes.append("Include blockquotes for expert quotes or key insights")
-    if include_italics:
-        formatting_notes.append("Use italics for emphasis on key terms")
-    if include_bold:
-        formatting_notes.append("Use bold for key phrases and important points")
+        formatting_notes.append(
+            "Include HTML blockquotes for expert quotes or key insights"
+        )
 
     system_prompt = f"""
 You are the editorial planning manager for {brand_name}.
@@ -548,7 +602,7 @@ schema EXACTLY:
   "primary_keyword": "string",
   "title": "string (5-200 chars)",
   "audience": "string",
-  "search_intent": "informational | commercial | transactional",
+  "search_intent": "informational | commercial | transactional | navigational",
   "article_angle": "string (10-1000 chars) - what unique angle
     will differentiate this article from competitors?",
   "target_word_count": {target_word_count},
@@ -573,7 +627,8 @@ RULES:
   keyword would want answered.
 - article_angle: identify what competitors are MISSING or doing
   POORLY, and make that the differentiating angle.
-- audience: infer from the search intent and competitor content.
+- audience: use the TARGET AUDIENCE supplied by the user when
+  present; otherwise infer from search intent and competitor content.
 - Keep additional_instructions under 500 characters.
 - Return ONLY the JSON object, no commentary.
 """
@@ -590,10 +645,15 @@ INTERNAL LINKS RULE — CRITICAL:
 Every internal link URL in the "internal_links" field MUST
 belong to the BRAND_WEBSITE above (or be a sub-path of it).
 NEVER invent, fabricate, or guess URLs. Only use URLs that
-are actually discoverable on the BRAND_WEBSITE. If the brand
-website has no relevant internal pages, return an empty
-internal_links list []. Do NOT use URLs from competitors
-or any other external source.
+are actually discoverable on the BRAND_WEBSITE. If the user
+provided internal links, copy those exactly and do not add
+others. If none were provided and the brand website has no
+relevant internal pages, return an empty internal_links
+list []. Do NOT use URLs from competitors or any other
+external source.
+
+{audience_instruction}
+{user_links_instruction}
 
 ARTICLE SCRAPING RULE — CRITICAL:
 Only scrape content from the BRAND_WEBSITE and BLOG_URL
@@ -602,6 +662,7 @@ website for internal links or facts. All internal links must
 come from the brand website only.
 
 {article_type_instruction}
+{search_intent_instruction}
 {pov_instruction}
 {readability_instruction}
 {brand_voice_instruction}
@@ -644,7 +705,8 @@ Generate the complete content brief as a single JSON object.
     formatting_directives = []
     if include_tables:
         formatting_directives.append(
-            "Include comparison tables where relevant."
+            "Include comparison tables where relevant, using HTML "
+            "<table> markup."
         )
     if include_h3:
         formatting_directives.append(
@@ -653,22 +715,14 @@ Generate the complete content brief as a single JSON object.
         )
     if include_lists:
         formatting_directives.append(
-            "Use bulleted and numbered lists for scannability "
-            "throughout the article."
+            "Use numbered lists for steps/instructions and bullet "
+            "lists for features/tips. One idea per list item. "
+            "Never combine numbered points into one paragraph. "
+            "Never use *, **, or _ for styling."
         )
     if include_quotes:
         formatting_directives.append(
-            "Include blockquotes (>) for expert quotes or key "
-            "insights."
-        )
-    if include_italics:
-        formatting_directives.append(
-            "Use italics (*text*) for emphasis on key terms."
-        )
-    if include_bold:
-        formatting_directives.append(
-            "Use bold (**text**) for key phrases and important "
-            "points throughout the article."
+            "Include <blockquote> for expert quotes or key insights."
         )
 
     if formatting_directives:
@@ -687,6 +741,28 @@ Generate the complete content brief as a single JSON object.
     brief.brand_name = brand_name
     brief.website = website
     brief.primary_keyword = keyword
+
+    if audience:
+        brief.audience = audience.strip()
+
+    brief.search_intent = resolved_intent
+
+    if internal_links:
+        brief.internal_links = list(internal_links)
+        link_block = "\n".join(
+            f"- [{link.anchor_text}]({link.url})"
+            for link in internal_links
+        )
+        link_directive = (
+            "\n\nINTERNAL LINKS TO INCLUDE IN THE ARTICLE "
+            "(Markdown [anchor](url), woven into relevant "
+            "sentences — do not dump them in a list):\n"
+            + link_block
+        )
+        if brief.additional_instructions:
+            brief.additional_instructions += link_directive
+        else:
+            brief.additional_instructions = link_directive.strip()
 
     # Structure/formatting flags come from the request, never the
     # brief LLM call - generate_single_call_article's extra_validate
