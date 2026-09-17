@@ -14,6 +14,8 @@
   const intentBody = document.getElementById("ca-intent-body");
   const compareBody = document.getElementById("ca-compare-body");
   const gapsBody = document.getElementById("ca-gaps-body");
+  const paaBody = document.getElementById("ca-paa-body");
+  const structureBody = document.getElementById("ca-structure-body");
   const snapshotSelect = document.getElementById("ca-snapshot");
   const fullCompareBtn = document.getElementById("ca-full-compare");
   const intentHeading = document.getElementById("ca-intent-heading");
@@ -220,19 +222,73 @@
     fullCompareBtn.textContent = compareExpanded ? "Hide extra metrics ↑" : "View full comparison →";
   }
 
+  function renderGapGroup(title, gaps) {
+    if (!gaps.length) return "";
+    return `
+      <div class="ca-gap-group">
+        <p class="ca-mini-label">${escapeHtml(title)}</p>
+        ${gaps.map((gap) => `
+          <div class="ca-gap">
+            <span class="ca-gap-dot ${escapeHtml(gap.severity || "low")}" aria-hidden="true"></span>
+            <div>
+              <strong>${escapeHtml(gap.title)}</strong>
+              <p>${escapeHtml(gap.description)}</p>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
   function renderGaps(result) {
-    const gaps = result?.gaps || [];
-    if (!gaps.length) {
+    const keywordGaps = result?.keyword_gaps || [];
+    const topicalGaps = result?.topical_gaps || [];
+    const entityGaps = result?.entity_gaps || [];
+    const flat = result?.gaps || [];
+    const html = [
+      renderGapGroup("Keyword gaps", keywordGaps),
+      renderGapGroup("Topical gaps", topicalGaps),
+      renderGapGroup("Entity gaps", entityGaps),
+    ].join("");
+    if (html.trim()) {
+      gapsBody.innerHTML = html;
+      return;
+    }
+    if (!flat.length) {
       gapsBody.innerHTML = `<div class="ca-empty">Gaps will appear here after analysis</div>`;
       return;
     }
-    gapsBody.innerHTML = gaps.map((gap) => `
-      <div class="ca-gap">
-        <span class="ca-gap-dot ${escapeHtml(gap.severity || "low")}" aria-hidden="true"></span>
-        <div>
-          <strong>${escapeHtml(gap.title)}</strong>
-          <p>${escapeHtml(gap.description)}</p>
-        </div>
+    gapsBody.innerHTML = renderGapGroup("Content gaps", flat);
+  }
+
+  function renderPaa(result) {
+    const items = result?.paa_opportunities || [];
+    if (!items.length) {
+      paaBody.innerHTML = `<div class="ca-empty">No question-style related queries in this SERP</div>`;
+      return;
+    }
+    paaBody.innerHTML = items.map((item) => `
+      <div class="ca-paa">
+        <span>${escapeHtml(item.query)}</span>
+        <span class="ca-badge ${item.answered ? "ca-badge-keep" : "ca-badge-add"}">
+          ${item.answered ? "Answered" : "Unanswered"}
+        </span>
+      </div>
+    `).join("");
+  }
+
+  function renderStructure(result) {
+    const items = result?.recommended_structure || [];
+    if (!items.length) {
+      structureBody.innerHTML = `<div class="ca-empty">A suggested outline will appear here after analysis</div>`;
+      return;
+    }
+    structureBody.innerHTML = items.map((item) => `
+      <div class="ca-structure">
+        <span>${escapeHtml(item.heading)}</span>
+        <span class="ca-badge ${item.status === "keep" ? "ca-badge-keep" : "ca-badge-add"}">
+          ${escapeHtml((item.status || "add").toUpperCase())}
+        </span>
       </div>
     `).join("");
   }
@@ -247,6 +303,8 @@
     renderIntent(result);
     renderComparison(result);
     renderGaps(result);
+    renderPaa(result);
+    renderStructure(result);
     setRewriteEnabled(true);
     const yours = result.your_page || {};
     console.log("[Competitor Analysis] Your H1s", yours.h1_count, yours.h1_headings || []);
@@ -337,6 +395,8 @@
     intentBody.innerHTML = `<div class="ca-empty">Search intent will appear here after analysis</div>`;
     compareBody.innerHTML = `<div class="ca-empty">Enter your blog URL above to see how it compares</div>`;
     gapsBody.innerHTML = `<div class="ca-empty">Gaps will appear here after analysis</div>`;
+    if (paaBody) paaBody.innerHTML = `<div class="ca-empty">Question queries will appear here after analysis</div>`;
+    if (structureBody) structureBody.innerHTML = `<div class="ca-empty">A suggested outline will appear here after analysis</div>`;
     fullCompareBtn.hidden = true;
     compareExpanded = false;
 
@@ -397,6 +457,10 @@
         description: gap.description,
         severity: gap.severity,
       })),
+      keywordGaps: currentResult.keyword_gaps || [],
+      topicalGaps: currentResult.topical_gaps || [],
+      entityGaps: currentResult.entity_gaps || [],
+      paaOpportunities: currentResult.paa_opportunities || [],
       oldScores: currentResult.old_scores || { seo: 0, geo: 0, aeo: 0 },
       sourceArticle: currentResult.source_article || "",
       sourceTitle: currentResult.source_title || "",

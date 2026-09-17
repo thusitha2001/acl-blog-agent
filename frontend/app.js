@@ -80,7 +80,7 @@ function updateWordCountLabel(inputId, labelId, limit) {
   fn();
 }
 
-updateWordCountLabel("instructions", "instructions-count", 150);
+updateWordCountLabel("instructions", "instructions-count", 500);
 updateWordCountLabel("hook-brief", "hook-brief-count", 30);
 updateWordCountLabel("bv-style", "bv-style-count", 60);
 updateWordCountLabel("audience", "audience-count", 40);
@@ -442,13 +442,58 @@ function renderOutput(result) {
   const linksHtml = (seo.internal_links || []).length
     ? '<div class="meta-card"><div class="meta-label">Internal Links</div><div class="meta-value">' +
       seo.internal_links.map((l) => {
-        const label = l.anchor_text || l.url;
-        return '<a href="' + (l.url || "#") + '" target="_blank" rel="noopener noreferrer">' +
-          label + '</a>';
-      }).join("<br>") +
-      '</div></div>'
+        const label = l.anchor_text || l.url || "Related page";
+        const reason = l.reason ? " — " + l.reason : "";
+        return "<div>" + label + reason + "</div>";
+      }).join("") +
+      "</div></div>"
     : "";
 
+  const externalHtml = (seo.external_source_suggestions || []).length
+    ? '<div class="meta-card"><div class="meta-label">External source suggestions</div><div class="meta-value">' +
+      seo.external_source_suggestions.map((item) => {
+        return "<div><strong>" + (item.url || "Source") + "</strong> — " + (item.reason || "") + "</div>";
+      }).join("") +
+      "</div></div>"
+    : "";
+
+  const priority = result.priority || "";
+  const checklist = result.implementation_checklist || {};
+  const impact = result.expected_impact || [];
+  const bucketOrder = ["critical", "high", "medium", "low"];
+  const checklistHtml = bucketOrder.some((key) => (checklist[key] || []).length)
+    ? bucketOrder.map((key) => {
+        const items = checklist[key] || [];
+        if (!items.length) return "";
+        return '<div class="meta-card"><div class="meta-label">' + key.toUpperCase() +
+          '</div><ul class="plan-check">' +
+          items.map((item) => '<li><label><input type="checkbox"> ' + item + "</label></li>").join("") +
+          "</ul></div>";
+      }).join("")
+    : "";
+  const impactHtml = impact.length
+    ? '<div class="meta-card"><div class="meta-label">Expected impact</div><div class="meta-value">' +
+      impact.map((row) =>
+        "<div class=\"impact-row\"><strong>" + (row.change || "") +
+        "</strong><p>" + (row.mechanism || "") + "</p><p>" + (row.expected_effect || "") +
+        "</p></div>"
+      ).join("") +
+      "</div></div>"
+    : "";
+  const planTab = (PAGE === "rewriter" && (checklistHtml || impactHtml || priority))
+    ? '<button class="tab-btn" role="tab" data-tab="plan" aria-selected="false">Plan</button>'
+    : "";
+  const planPanel = (PAGE === "rewriter" && (checklistHtml || impactHtml || priority))
+    ? '<div class="tab-panel" id="tab-plan" role="tabpanel">' +
+      (priority ? '<div class="meta-card"><div class="meta-label">Rewrite priority</div><div class="meta-value"><span class="ca-badge ca-badge-add">' +
+        priority + "</span> — based on overall score " + (scores.overall ?? "—") +
+        "</div></div>" : "") +
+      checklistHtml + impactHtml +
+      "</div>"
+    : "";
+  const priorityBadge = (PAGE === "rewriter" && priority)
+    ? '<div class="priority-banner">Implementation priority: <strong>' + priority + "</strong></div>"
+    : "";
   const seoReport = scores.seo || {};
   const geoReport = scores.geo || {};
   const aeoReport = scores.aeo || {};
@@ -468,12 +513,14 @@ function renderOutput(result) {
       <div class="stat-card"><div class="stat-value">${stats.h1_count ?? 0}</div><div class="stat-label">H1 Count</div></div>
       <div class="stat-card"><div class="stat-value">${stats.keyword_count ?? 0}</div><div class="stat-label">Keyword Hits</div></div>
     </div>
+    ${priorityBadge}
     ${scoresHtml}
     <div class="tabs" role="tablist">
       <button class="tab-btn active" role="tab" data-tab="article" aria-selected="true">Article</button>
       <button class="tab-btn" role="tab" data-tab="scores" aria-selected="false">Scores</button>
       <button class="tab-btn" role="tab" data-tab="seo" aria-selected="false">SEO</button>
       <button class="tab-btn" role="tab" data-tab="serp" aria-selected="false">SERP</button>
+      ${planTab}
     </div>
     <div class="tab-panel active" id="tab-article" role="tabpanel">
       <div class="article-toolbar">
@@ -507,6 +554,7 @@ function renderOutput(result) {
       <div class="meta-card"><div class="meta-label">Search Intent</div><div class="meta-value">${result.brief?.search_intent || "—"}</div></div>
       <div class="meta-card"><div class="meta-label">Secondary Keywords</div><div class="meta-value mono">${(seo.secondary_keywords || []).join(", ") || "—"}</div></div>
       ${linksHtml}
+      ${externalHtml}
       ${faqsHtml}
       ${issueRowsHtml ? '<div class="meta-card"><div class="meta-label">SEO Recommendations</div><ul class="issue-list">' + issueRowsHtml + '</ul></div>' : ""}
     </div>
@@ -516,6 +564,7 @@ function renderOutput(result) {
       ${nlpKeywordsHtml}
       <div class="meta-card"><div class="meta-label">Related Queries</div><div class="meta-value">${(serp.related_queries || []).join("<br>") || "—"}</div></div>
     </div>
+    ${planPanel}
   `;
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -527,7 +576,7 @@ function renderOutput(result) {
       document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       btn.classList.add("active");
       btn.setAttribute("aria-selected", "true");
-      document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      document.getElementById("tab-" + btn.dataset.tab)?.classList.add("active");
     });
   });
 
@@ -736,7 +785,7 @@ document.getElementById("brief-form")?.addEventListener("submit", async (e) => {
 
   const wordCount = (s) => s ? s.split(/\s+/).filter(Boolean).length : 0;
 
-  if (wordCount(instructionsVal) > 150) { alert("Additional Instructions limited to 150 words."); return; }
+  if (wordCount(instructionsVal) > 500) { alert("Additional Instructions limited to 500 words."); return; }
   if (wordCount(hookBriefVal) > 30) { alert("Hook Brief limited to 30 words."); return; }
   if (wordCount(brandVoiceVal) > 100) { alert("Brand Voice limited to 100 words."); return; }
   const audienceVal = document.getElementById("audience").value.trim();
@@ -837,8 +886,8 @@ document.getElementById("rewrite-form")?.addEventListener("submit", async (e) =>
     alert("Paste at least 200 characters of the original article.");
     return;
   }
-  if (wordCountOf(instructionsVal) > 150) {
-    alert("Additional Instructions limited to 150 words.");
+  if (wordCountOf(instructionsVal) > 500) {
+    alert("Additional Instructions limited to 500 words.");
     return;
   }
   if (wordCountOf(audienceVal) > 40) {
@@ -969,12 +1018,12 @@ function restoreCompetitorHandoff() {
   }
   const instructions = document.getElementById("instructions");
   if (instructions && !instructions.value.trim()) {
-    instructions.value = buildGapInstructions(data.gaps || [], data.oldScores || {});
+    instructions.value = buildGapInstructions(data);
     const badge = document.getElementById("instructions-count");
     if (badge) {
       const words = wordCountOf(instructions.value.trim());
-      badge.textContent = words + "/150 words";
-      badge.classList.toggle("over", words > 150);
+      badge.textContent = words + "/500 words";
+      badge.classList.toggle("over", words > 500);
     }
   }
   renderHandoffSummary(data);
@@ -1004,9 +1053,34 @@ function isCleanGapTitle(title) {
   return true;
 }
 
-function buildGapInstructions(gaps, scores) {
-  const clean = (gaps || []).filter((gap) => isCleanGapTitle(gap.title));
-  const lines = ["Close these content gaps from competitor analysis:"];
+function collectHandoffGaps(data) {
+  const lists = [
+    ...(data.keywordGaps || []),
+    ...(data.topicalGaps || []),
+    ...(data.entityGaps || []),
+    ...(data.gaps || []),
+  ];
+  const seen = new Set();
+  const unique = [];
+  lists.forEach((gap) => {
+    const title = String(gap.title || "").trim();
+    if (!title || seen.has(title.toLowerCase()) || !isCleanGapTitle(title)) return;
+    seen.add(title.toLowerCase());
+    unique.push(gap);
+  });
+  (data.paaOpportunities || []).forEach((item) => {
+    if (item.answered) return;
+    const query = String(item.query || "").trim();
+    if (!query) return;
+    unique.push({ title: "Unanswered PAA", description: query });
+  });
+  return unique;
+}
+
+function buildGapInstructions(data) {
+  const clean = collectHandoffGaps(data || {});
+  const scores = data?.oldScores || {};
+  const lines = ["Close these gaps:"];
   clean.forEach((gap) => {
     const title = String(gap.title || "").trim();
     const desc = String(gap.description || "").trim();
@@ -1017,15 +1091,15 @@ function buildGapInstructions(gaps, scores) {
   }
   let text = lines.join("\n");
   const words = text.trim().split(/\s+/);
-  if (words.length > 150) text = words.slice(0, 150).join(" ");
-  return text.slice(0, 1000);
+  if (words.length > 500) text = words.slice(0, 500).join(" ");
+  return text.slice(0, 4000);
 }
 
 function renderHandoffSummary(data) {
   const output = document.getElementById("output-body");
   if (!output) return;
   const count = (data.competitors || []).length;
-  const gaps = (data.gaps || []).filter((gap) => isCleanGapTitle(gap.title));
+  const gaps = collectHandoffGaps(data);
   const gapHtml = gaps.length
     ? gaps.map((gap) => `<li><strong>${escapeHtml(gap.title)}</strong> — ${escapeHtml(gap.description || "")}</li>`).join("")
     : "<li>No gap summaries were attached.</li>";

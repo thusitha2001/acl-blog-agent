@@ -257,10 +257,21 @@ key, no markdown fences, no commentary before or after the JSON):
   "faqs": [
     {{"question": "string", "answer": "string"}}
   ],
-  "alt_texts": ["string", "string"]
+  "alt_texts": ["string", "string"],
+  "internal_links": [
+    {{"anchor_text": "string", "reason": "link to your page about X — do not invent a specific path"}}
+  ],
+  "external_source_suggestions": [
+    {{"url": "string — a source type or well-known domain (.gov, .edu, or a known industry site), not a fabricated article URL", "reason": "string"}}
+  ]
 }}
 
 faqs should answer the brief's reader_questions where relevant.
+internal_links are suggestions only: describe the destination in reason
+as "link to your page about X". Do not invent exact site paths.
+external_source_suggestions: 2–4 items. Prefer source types
+(.gov, .edu, known industry publishers). If you are not certain a
+specific article URL is live, return the domain or type instead.
 Do not invent statistics, certifications, studies, or product specs
 beyond what is given in VERIFIED FACTS or the brief's product_facts.
 """

@@ -251,8 +251,8 @@ class OneClickRequest(BaseModel):
     )
     additional_instructions: str = Field(
         default="",
-        max_length=1000,
-        description="Additional instructions (max 150 words)",
+        max_length=4000,
+        description="Additional instructions (max 500 words)",
     )
     hook_type: str = Field(
         default="question",
@@ -301,9 +301,9 @@ class OneClickRequest(BaseModel):
     @field_validator("additional_instructions")
     @classmethod
     def _word_limit_instructions(cls, value: str) -> str:
-        if len(value.split()) > 150:
+        if len(value.split()) > 500:
             raise ValueError(
-                "Additional Instructions must be 150 words or fewer "
+                "Additional Instructions must be 500 words or fewer "
                 f"(got {len(value.split())})."
             )
         return value
@@ -378,7 +378,14 @@ class RewriteRequest(BaseModel):
     website: Optional[str] = Field(default=None, max_length=300)
     brand_voice: Optional[str] = Field(default=None, max_length=500)
     audience: Optional[str] = Field(default=None, max_length=300)
-    additional_instructions: str = Field(default="", max_length=1000)
+    additional_instructions: str = Field(
+        default="",
+        max_length=4000,
+        description=(
+            "Optional rewrite notes, max 500 words. Competitor Analysis "
+            "pre-fills this with gap-closing instructions."
+        ),
+    )
     include_faq: bool = True
     include_takeaways: bool = True
     include_conclusion: bool = True
@@ -398,9 +405,9 @@ class RewriteRequest(BaseModel):
     @field_validator("additional_instructions")
     @classmethod
     def _rewrite_word_limit_instructions(cls, value: str) -> str:
-        if len(value.split()) > 150:
+        if len(value.split()) > 500:
             raise ValueError(
-                "Additional Instructions must be 150 words or fewer "
+                "Additional Instructions must be 500 words or fewer "
                 f"(got {len(value.split())})."
             )
         return value

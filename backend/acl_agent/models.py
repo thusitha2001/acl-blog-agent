@@ -158,6 +158,10 @@ class SEOAnalysis(BaseModel):
     alt_texts: list[str] = Field(
         default_factory=list,
     )
+    external_source_suggestions: list[dict[str, str]] = Field(
+        default_factory=list,
+        description='Suggested sources as {"url": source type or domain, "reason": str}.',
+    )
     cannibalization_flags: list[dict[str, str]] = Field(
         default_factory=list,
     )
@@ -193,5 +197,13 @@ class SingleCallArticle(BaseModel):
     )
     alt_texts: list[str] = Field(
         default_factory=list,
+    )
+    internal_links: list[dict[str, str]] = Field(
+        default_factory=list,
+        description='Suggestions: {"anchor_text", "reason"}; url optional.',
+    )
+    external_source_suggestions: list[dict[str, str]] = Field(
+        default_factory=list,
+        description='{"url": domain or source type, "reason": str}',
     )
 

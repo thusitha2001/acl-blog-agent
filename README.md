@@ -162,7 +162,7 @@ python app.py quick "how to choose linen table runners" --size medium
 | `brand_voice` | Max **100 words**. |
 | `hook_type` | `question, statistic, fact, anecdote`. |
 | `hook_brief` | Max **30 words**. |
-| `additional_instructions` | Max **150 words** (and 1000 chars). |
+| `additional_instructions` | Max **500 words** (and 4000 chars). |
 | `include_faq/_takeaways/_conclusion` | Toggle sections on/off. |
 | `include_tables/_h3/_lists/_quotes/_italics/_bold` | Structure toggles. |
 

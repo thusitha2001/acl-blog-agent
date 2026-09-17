@@ -1805,6 +1805,85 @@ body.ws[data-page="competitors"] .ws-page {
   text-overflow: unset;
 }
 
+.ca-gap-group + .ca-gap-group { margin-top: 14px; }
+.ca-gap-group .ca-mini-label { margin-bottom: 4px; }
+
+.ca-paa,
+.ca-structure {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--ws-line);
+  font-size: 13px;
+}
+
+.ca-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.ca-badge-keep {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.ca-badge-add {
+  background: var(--ws-purple-soft);
+  color: var(--ws-purple);
+}
+
+.priority-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--ws-purple-soft);
+  color: var(--ws-purple);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plan-check {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-check li {
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.plan-check label {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 8px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.plan-check input[type="checkbox"] {
+  margin-top: 3px;
+}
+
+.impact-row {
+  padding: 8px 0;
+  border-top: 1px solid var(--ws-line);
+}
+
+.impact-row:first-child { border-top: 0; padding-top: 0; }
+
+.impact-row p {
+  margin: 4px 0 0;
+  color: var(--ws-muted);
+  font-size: 12px;
+}
+
 @media (max-width: 1100px) {
   .ca-grid { grid-template-columns: 1fr; }
   .ca-cols,

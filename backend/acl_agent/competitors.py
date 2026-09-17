@@ -629,54 +629,208 @@ def _finished_sentence(text: str) -> str:
     return text
 
 
-def _build_gaps(
-    keyword: str,
-    your_page: Optional[dict[str, Any]],
-    competitors: list[dict[str, Any]],
-    related_queries: list[str],
-    common_headings: list[str],
-) -> list[dict[str, str]]:
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+_QUESTION_START = re.compile(
+    r"^(how|what|why|is|does|can|when|where|who|which|should|are|do)\b",
+    re.IGNORECASE,
+)
+_ENTITY_SKIP = {
+    "table of contents", "key takeaways", "frequently asked",
+    "related articles", "privacy policy", "terms of service",
+    "cookie policy", "all rights reserved", "read more",
+}
+
+
+def _page_blob(your_page: Optional[dict[str, Any]]) -> str:
     your_text = (your_page or {}).get("text", "").lower()
     your_html = (your_page or {}).get("article_html", "").lower()
     your_h2 = " ".join((your_page or {}).get("h2_headings") or []).lower()
-    blob = f"{your_text} {your_html} {your_h2}"
-    gaps: list[dict[str, str]] = []
+    return f"{your_text} {your_html} {your_h2}"
 
-    def covered(phrase: str) -> bool:
-        tokens = [t for t in re.findall(r"[a-z0-9]+", phrase.lower()) if len(t) > 3]
-        if not tokens:
-            return True
-        return sum(1 for t in tokens if t in blob) >= max(1, len(tokens) // 2)
 
-    missing_topics: list[str] = []
-    seen_h2: set[str] = set()
+def _phrase_covered(phrase: str, blob: str) -> bool:
+    tokens = [t for t in re.findall(r"[a-z0-9]+", phrase.lower()) if len(t) > 3]
+    if not tokens:
+        return True
+    return sum(1 for t in tokens if t in blob) >= max(1, len(tokens) // 2)
+
+
+def _dedupe_gaps(gaps: list[dict[str, str]], limit: int = 8) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    unique: list[dict[str, str]] = []
+    for gap in gaps:
+        key = (gap.get("title") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(gap)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _sort_gaps(gaps: list[dict[str, str]]) -> list[dict[str, str]]:
+    return sorted(
+        gaps,
+        key=lambda gap: _SEVERITY_RANK.get(str(gap.get("severity") or "low"), 9),
+    )
+
+
+def _missing_competitor_topics(
+    your_page: Optional[dict[str, Any]],
+    competitors: list[dict[str, Any]],
+) -> list[str]:
+    blob = _page_blob(your_page)
+    missing: list[str] = []
+    seen: set[str] = set()
     for competitor in competitors:
         for heading in competitor.get("h2_headings") or []:
             cleaned = _clean_section_label(heading)
             if not cleaned:
                 continue
             key = cleaned.lower()
-            if key in seen_h2 or covered(cleaned):
+            if key in seen or _phrase_covered(cleaned, blob):
                 continue
-            seen_h2.add(key)
-            missing_topics.append(cleaned)
+            seen.add(key)
+            missing.append(cleaned)
+    return missing
 
-    if missing_topics:
-        shown = ", ".join(missing_topics[:3])
+
+def _build_entity_gaps(
+    your_page: Optional[dict[str, Any]],
+    competitors: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Named entities on ranking pages that do not appear on the user's page."""
+    blob = _page_blob(your_page)
+    counts: dict[str, int] = {}
+    for competitor in competitors:
+        text = " ".join([
+            str(competitor.get("title") or ""),
+            str(competitor.get("text") or "")[:4000],
+        ])
+        for match in re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text):
+            cleaned = " ".join(match.split())
+            if len(cleaned) < 6 or cleaned.lower() in _ENTITY_SKIP:
+                continue
+            if _phrase_covered(cleaned, blob):
+                continue
+            counts[cleaned] = counts.get(cleaned, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    gaps: list[dict[str, str]] = []
+    for name, hits in ranked[:6]:
         gaps.append({
-            "severity": "high",
-            "title": "Missing competitor sections",
+            "severity": "medium" if hits >= 2 else "low",
+            "title": f"Missing entity: {name}",
             "description": _finished_sentence(
-                f"Ranking pages cover {shown}, and your post does not"
+                f'Ranking pages mention "{name}", and your page never names it'
+            ),
+        })
+    return gaps
+
+
+def _build_paa_opportunities(
+    related_queries: list[str],
+    your_page: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    blob = _page_blob(your_page)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for query in related_queries:
+        phrase = " ".join(str(query or "").split())
+        if not phrase:
+            continue
+        if not (phrase.endswith("?") or _QUESTION_START.match(phrase)):
+            continue
+        key = phrase.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "query": phrase,
+            "answered": _phrase_covered(phrase, blob),
+        })
+        if len(items) >= 12:
+            break
+    return items
+
+
+def _build_recommended_structure(
+    your_page: Optional[dict[str, Any]],
+    common_headings: list[str],
+    topical_gaps: list[dict[str, str]],
+    missing_topics: list[str],
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(heading: str, status: str, source: str) -> None:
+        cleaned = _clean_section_label(heading) or " ".join((heading or "").split())
+        if not cleaned:
+            return
+        key = cleaned.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        items.append({"heading": cleaned, "status": status, "source": source})
+
+    for heading in (your_page or {}).get("h2_headings") or []:
+        add(heading, "keep", "your page")
+    for heading in common_headings:
+        add(heading, "add", "competitor H2s")
+    for heading in missing_topics:
+        add(heading, "add", "competitor H2s")
+    for gap in topical_gaps:
+        title = str(gap.get("title") or "")
+        implied = re.sub(r"^missing (?:section|core section):\s*", "", title, flags=re.I)
+        if implied and implied.lower() not in {"missing faq block", "no ecommerce workflow", "shorter than ranking pages"}:
+            add(implied, "add", "topical gap")
+    return items[:16]
+
+
+def _build_gaps(
+    keyword: str,
+    your_page: Optional[dict[str, Any]],
+    competitors: list[dict[str, Any]],
+    related_queries: list[str],
+    common_headings: list[str],
+) -> dict[str, Any]:
+    """
+    Split content gaps into keyword, topical, and entity lists.
+
+    Also returns a combined `gaps` list (all three, severity-sorted)
+    so existing readers of the flat field keep working.
+    """
+    blob = _page_blob(your_page)
+    missing_topics = _missing_competitor_topics(your_page, competitors)
+
+    keyword_gaps: list[dict[str, str]] = []
+    query_hits = [q for q in related_queries if q and not _phrase_covered(q, blob)]
+    for query in query_hits[:5]:
+        keyword_gaps.append({
+            "severity": "high" if not keyword_gaps else "medium",
+            "title": f'Uncovered query: {query}',
+            "description": _finished_sentence(
+                f'People also search for "{query}", '
+                "and your page does not answer that query yet"
             ),
         })
 
+    topical_gaps: list[dict[str, str]] = []
+    for topic in missing_topics[:5]:
+        topical_gaps.append({
+            "severity": "high",
+            "title": f"Missing section: {topic}",
+            "description": _finished_sentence(
+                f'Ranking pages cover "{topic}", and your post does not'
+            ),
+        })
+    seen_topics = {t.lower() for t in missing_topics}
     for heading in common_headings:
         cleaned = _clean_section_label(heading)
-        if cleaned and not covered(cleaned) and cleaned.lower() not in seen_h2:
-            gaps.append({
+        if cleaned and not _phrase_covered(cleaned, blob) and cleaned.lower() not in seen_topics:
+            topical_gaps.append({
                 "severity": "medium",
-                "title": "Missing core section",
+                "title": f"Missing core section: {cleaned}",
                 "description": _finished_sentence(
                     f'Several ranking pages treat "{cleaned}" as a core section, '
                     "and your draft does not"
@@ -684,23 +838,11 @@ def _build_gaps(
             })
             break
 
-    query_hits = [q for q in related_queries if q and not covered(q)]
-    if query_hits:
-        query = query_hits[0]
-        gaps.append({
-            "severity": "medium" if gaps else "high",
-            "title": "Unanswered related search",
-            "description": _finished_sentence(
-                f'People also search for "{query}", '
-                "and your page does not answer that query yet"
-            ),
-        })
-
     comp_words = [int(c.get("word_count") or 0) for c in competitors]
     avg_words = int(sum(comp_words) / len(comp_words)) if comp_words else 0
     your_words = int((your_page or {}).get("word_count") or 0)
     if your_page and avg_words and your_words < avg_words * 0.7:
-        gaps.append({
+        topical_gaps.append({
             "severity": "high",
             "title": "Shorter than ranking pages",
             "description": _finished_sentence(
@@ -717,7 +859,7 @@ def _build_gaps(
         )
     )
     if ecommerce_comp >= 2 and your_page and "ecommerce" not in blob and "shopify" not in blob:
-        gaps.append({
+        topical_gaps.append({
             "severity": "medium",
             "title": "No ecommerce workflow",
             "description": _finished_sentence(
@@ -732,7 +874,7 @@ def _build_gaps(
         or f"{c.get('text', '')}".count("?") >= 4
     )
     if faq_comp >= 2 and your_page and "faq" not in blob:
-        gaps.append({
+        topical_gaps.append({
             "severity": "low",
             "title": "Missing FAQ block",
             "description": _finished_sentence(
@@ -742,7 +884,7 @@ def _build_gaps(
         })
 
     if not your_page:
-        gaps.append({
+        topical_gaps.append({
             "severity": "medium",
             "title": f"Own the {keyword} angle",
             "description": _finished_sentence(
@@ -750,25 +892,27 @@ def _build_gaps(
             ),
         })
 
-    seen: set[str] = set()
-    unique: list[dict[str, str]] = []
-    for gap in gaps:
-        key = gap["title"].lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(gap)
-        if len(unique) >= 5:
-            break
-    if not unique:
-        unique.append({
+    entity_gaps = _build_entity_gaps(your_page, competitors)
+    keyword_gaps = _dedupe_gaps(keyword_gaps)
+    topical_gaps = _dedupe_gaps(topical_gaps)
+    entity_gaps = _dedupe_gaps(entity_gaps)
+    combined = _sort_gaps(keyword_gaps + topical_gaps + entity_gaps)
+    if not combined:
+        topical_gaps = [{
             "severity": "low",
             "title": "Sharpen the unique angle",
             "description": _finished_sentence(
                 "Ranking pages overlap, so call out the audience and outcome they skip"
             ),
-        })
-    return unique
+        }]
+        combined = list(topical_gaps)
+    return {
+        "keyword_gaps": keyword_gaps,
+        "topical_gaps": topical_gaps,
+        "entity_gaps": entity_gaps,
+        "gaps": combined,
+        "missing_topics": missing_topics,
+    }
 
 
 def analyze_competitors(
@@ -776,6 +920,15 @@ def analyze_competitors(
     keyword: Optional[str] = None,
     on_progress: ProgressFn = None,
 ) -> dict[str, Any]:
+    """
+    Live SERP competitor snapshot plus content-gap analysis.
+
+    Extra keys on the returned dict (plain dict, no Pydantic model):
+      keyword_gaps / topical_gaps / entity_gaps: severity/title/description
+      gaps: concatenation of those three, sorted by severity
+      paa_opportunities: {query, answered} from related question queries
+      recommended_structure: {heading, status keep|add, source}
+    """
     blog_url = (blog_url or "").strip() or None
     keyword = (keyword or "").strip() or None
     if not blog_url and not keyword:
@@ -916,12 +1069,22 @@ def analyze_competitors(
         },
     }
 
-    gaps = _build_gaps(
+    gap_bundle = _build_gaps(
         keyword,
         your_page,
         competitors,
         list(serp.related_queries or []),
         list(serp.common_headings or []),
+    )
+    paa_opportunities = _build_paa_opportunities(
+        list(serp.related_queries or []),
+        your_page,
+    )
+    recommended_structure = _build_recommended_structure(
+        your_page,
+        list(serp.common_headings or []),
+        gap_bundle["topical_gaps"],
+        gap_bundle.get("missing_topics") or [],
     )
 
     source_article = ""
@@ -975,7 +1138,12 @@ def analyze_competitors(
             "cue": _writing_cue({"heading": heading}),
         },
         "comparison": comparison,
-        "gaps": gaps,
+        "gaps": gap_bundle["gaps"],
+        "keyword_gaps": gap_bundle["keyword_gaps"],
+        "topical_gaps": gap_bundle["topical_gaps"],
+        "entity_gaps": gap_bundle["entity_gaps"],
+        "paa_opportunities": paa_opportunities,
+        "recommended_structure": recommended_structure,
         "serp": {
             "keyword": serp.keyword,
             "related_queries": serp.related_queries[:8],
