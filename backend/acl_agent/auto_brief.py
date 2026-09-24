@@ -7,10 +7,15 @@ This is the core of the 1-click blog post feature.
 """
 from __future__ import annotations
 
+import base64
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import parse_qs, unquote, urlparse
+
+import requests
+from bs4 import BeautifulSoup
 
 from acl_agent.config import SERP_RESULTS_COUNT, logger
 
@@ -33,47 +38,133 @@ class SERPAnalysis:
     content_gaps: list[str] = field(default_factory=list)
 
 
+def _unwrap_bing_href(href: str) -> str:
+    if not href:
+        return ""
+    if "bing.com/ck" not in href:
+        return href
+    raw = unquote((parse_qs(urlparse(href).query).get("u") or [""])[0])
+    if raw.startswith("a1"):
+        raw = raw[2:]
+    pad = "=" * ((4 - len(raw) % 4) % 4)
+    try:
+        decoded = base64.b64decode(raw + pad).decode("utf-8")
+    except Exception:
+        return href
+    if decoded.startswith("http"):
+        return decoded
+    return href
+
+
+def _search_bing(
+    keyword: str,
+    max_results: int,
+    country: str = "us",
+    language: str = "en",
+) -> list[SERPResult]:
+    """Fetch organic results from Bing HTML. Works when ddgs backends time out."""
+    cc = (country or "us").lower()[:8]
+    lang = (language or "en").lower()[:8]
+    response = requests.get(
+        "https://www.bing.com/search",
+        params={
+            "q": keyword,
+            "count": str(max(10, max_results)),
+            "setlang": lang,
+            "cc": cc,
+        },
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": f"{lang},en;q=0.8",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    results: list[SERPResult] = []
+    seen: set[str] = set()
+    for item in soup.select("li.b_algo"):
+        anchor = item.select_one("h2 a")
+        if anchor is None:
+            continue
+        url = _unwrap_bing_href(str(anchor.get("href") or ""))
+        title = " ".join(anchor.get_text(" ", strip=True).split())
+        if not url.startswith("http") or "bing.com/" in url:
+            continue
+        host = urlparse(url).netloc.lower()
+        if host in seen:
+            continue
+        seen.add(host)
+        snippet_el = item.select_one(".b_caption p") or item.select_one("p")
+        snippet = " ".join((snippet_el.get_text(" ", strip=True) if snippet_el else "").split())
+        results.append(SERPResult(title=title[:240], url=url, snippet=snippet[:400]))
+        if len(results) >= max_results:
+            break
+    logger.info("Bing HTML returned %s results for '%s'", len(results), keyword)
+    return results
+
+
 def search_serp(
     keyword: str,
     max_results: int = SERP_RESULTS_COUNT,
+    country: str = "us",
+    language: str = "en",
 ) -> list[SERPResult]:
     """
-    Search DuckDuckGo for the keyword and return top results
+    Search the live web for the keyword and return top results
     with title, URL, and snippet.
     """
+    queries = [keyword.strip()]
+    shorter = re.split(r"\s*[:|]\s*", keyword)[0].strip()
+    words = re.findall(r"[A-Za-z0-9']+", shorter)
+    if len(words) > 6:
+        shorter = " ".join(words[:6])
+    if shorter and shorter.lower() != keyword.strip().lower():
+        queries.append(shorter)
+
+    for query in queries:
+        if not query:
+            continue
+        try:
+            bing_results = _search_bing(query, max_results, country=country, language=language)
+        except Exception as error:
+            logger.warning("Bing HTML search failed for '%s': %s", query, error)
+            bing_results = []
+        if bing_results:
+            return bing_results
+
     try:
         from ddgs import DDGS
     except ImportError:
-        logger.warning(
-            "ddgs not installed. "
-            "Run: pip install ddgs"
-        )
+        logger.warning("ddgs not installed. Run: pip install ddgs")
         return []
 
-    results: list[SERPResult] = []
-
-    try:
-        with DDGS() as ddgs:
-            for r in ddgs.text(
-                keyword,
-                max_results=max_results,
-                region="wt-wt",
-            ):
-                results.append(
-                    SERPResult(
-                        title=r.get("title", ""),
-                        url=r.get("href", ""),
-                        snippet=r.get("body", ""),
-                    )
+    for query in queries:
+        try:
+            with DDGS(timeout=8) as ddgs:
+                rows = list(ddgs.text(query, max_results=max_results, region="us-en", backend="duckduckgo"))
+        except Exception as error:
+            logger.warning("SERP duckduckgo failed for '%s': %s", query, error)
+            continue
+        results: list[SERPResult] = []
+        for row in rows:
+            href = row.get("href") or row.get("url") or ""
+            if not href:
+                continue
+            results.append(
+                SERPResult(
+                    title=row.get("title") or "",
+                    url=href,
+                    snippet=row.get("body") or row.get("description") or "",
                 )
-    except Exception as error:
-        logger.warning(
-            "SERP search failed for '%s': %s",
-            keyword,
-            error,
-        )
-
-    return results
+            )
+        if results:
+            return results
+    return []
 
 
 def extract_nlp_keywords(
@@ -311,6 +402,8 @@ def extract_related_queries(
 def analyze_serp(
     keyword: str,
     max_results: int = SERP_RESULTS_COUNT,
+    country: str = "us",
+    language: str = "en",
 ) -> SERPAnalysis:
     """
     Full SERP analysis: search, extract keywords, headings,
@@ -322,7 +415,7 @@ def analyze_serp(
         keyword,
     )
 
-    results = search_serp(keyword, max_results)
+    results = search_serp(keyword, max_results, country=country, language=language)
 
     logger.info(
         "Found %s SERP results",

@@ -15,6 +15,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError
 
@@ -45,6 +48,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+class NoStoreFrontendMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        path = request.url.path
+        if (
+            path.startswith("/assets/")
+            or path in {
+                "/",
+                "/writer",
+                "/rewriter",
+                "/competitors",
+                "/editor",
+                "/login",
+                "/settings",
+            }
+        ):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.add_middleware(NoStoreFrontendMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -426,18 +451,26 @@ class RewriteRequest(BaseModel):
 class CompetitorAnalyzeRequest(BaseModel):
     blog_url: Optional[str] = Field(default=None, max_length=500)
     keyword: Optional[str] = Field(default=None, max_length=200)
+    competitor_urls: list[str] = Field(default_factory=list)
+    country: Optional[str] = Field(default="us", max_length=8)
+    language: Optional[str] = Field(default="en", max_length=8)
+    competitor_count: Optional[int] = Field(default=5, ge=3, le=10)
+    client_analysis_id: Optional[str] = Field(default=None, max_length=80)
 
     @field_validator("blog_url")
     @classmethod
     def _clean_blog_url(cls, value: Optional[str]) -> Optional[str]:
+        from acl_agent.analysis_input import validate_blog_url
+
         if value is None:
             return None
         stripped = value.strip()
         if not stripped:
             return None
-        if not re.match(r"^https?://", stripped, flags=re.IGNORECASE):
-            raise ValueError("Blog URL must start with http:// or https://")
-        return stripped
+        check = validate_blog_url(stripped)
+        if not check["ok"]:
+            raise ValueError(check["error"] or "Please enter a valid public article URL.")
+        return check["url"]
 
     @field_validator("keyword")
     @classmethod
@@ -446,6 +479,36 @@ class CompetitorAnalyzeRequest(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
+
+    @field_validator("competitor_urls", mode="before")
+    @classmethod
+    def _clean_competitor_urls(cls, value: object) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            value = re.split(r"[\n,]+", value)
+        if not isinstance(value, list):
+            raise ValueError("Competitor URLs must be a list")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            url = " ".join(str(item or "").split())
+            if not url:
+                continue
+            if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+                url = "https://" + url
+            if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+                raise ValueError("Each competitor URL must start with http:// or https://")
+            if len(url) > 500:
+                raise ValueError("Each competitor URL must be 500 characters or fewer")
+            key = url.lower().rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(url)
+            if len(cleaned) >= 10:
+                break
+        return cleaned
 
 
 class ScoreArticleRequest(BaseModel):
@@ -815,11 +878,22 @@ async def analyze_competitors_stream_endpoint(
     request: CompetitorAnalyzeRequest,
     _user: dict = Depends(require_auth),
 ):
-    if not request.blog_url and not request.keyword:
+    if not request.blog_url and not request.keyword and not request.competitor_urls:
         raise HTTPException(
             status_code=400,
-            detail={"message": "Enter a blog URL or a target keyword."},
+            detail={"message": "Enter a blog URL, a target keyword, or competitor URLs."},
         )
+
+    logger.info(
+        "analyze-competitors-stream blog_url=%r keyword=%r country=%s language=%s count=%s urls=%s client_id=%s",
+        request.blog_url,
+        request.keyword,
+        request.country,
+        request.language,
+        request.competitor_count,
+        request.competitor_urls,
+        request.client_analysis_id,
+    )
 
     request_id = str(uuid.uuid4())
     queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
@@ -845,6 +919,11 @@ async def analyze_competitors_stream_endpoint(
                     analyze_competitors,
                     blog_url=request.blog_url,
                     keyword=request.keyword,
+                    competitor_urls=request.competitor_urls,
+                    country=request.country,
+                    language=request.language,
+                    competitor_count=request.competitor_count,
+                    client_analysis_id=request.client_analysis_id,
                     on_progress=lambda stage, message: emit(
                         "stage",
                         {

@@ -537,12 +537,12 @@ function renderOutput(result) {
           ${renderScoreFactors(seoReport)}
         </section>
         <section>
-          <h3>GEO — Generative engines</h3>
+          <h3>GEO — Citation readiness</h3>
           <p class="score-detail-lead">${geoReport.summary || ""} Score ${geoReport.score ?? "—"} (${geoReport.grade || ""}).</p>
           ${renderScoreFactors(geoReport)}
         </section>
         <section>
-          <h3>AEO — Answer engines</h3>
+          <h3>AEO — Answer readiness</h3>
           <p class="score-detail-lead">${aeoReport.summary || ""} Score ${aeoReport.score ?? "—"} (${aeoReport.grade || ""}).</p>
           ${renderScoreFactors(aeoReport)}
         </section>
@@ -847,6 +847,10 @@ document.getElementById("brief-form")?.addEventListener("submit", async (e) => {
       body: JSON.stringify(payload)
     });
 
+    if (response.status === 401) {
+      window.BlogAgentAuth?.handleUnauthorized?.();
+      throw new Error("Please log in again.");
+    }
     if (!response.ok || !response.body) {
       stopTimer();
       renderTracker(-1);
@@ -940,6 +944,10 @@ document.getElementById("rewrite-form")?.addEventListener("submit", async (e) =>
       body: JSON.stringify(payload),
     });
 
+    if (response.status === 401) {
+      window.BlogAgentAuth?.handleUnauthorized?.();
+      throw new Error("Please log in again.");
+    }
     if (!response.ok || !response.body) {
       stopTimer();
       renderTracker(-1);
@@ -985,8 +993,7 @@ function restoreCompetitorHandoff() {
   window.__competitorHandoff = data;
   console.log(
     "[Blog Rewriter] handoff competitors",
-    (data.competitors || []).length,
-    data.gaps
+    (data.competitors || []).length
   );
 
   const source = document.getElementById("source-article");
@@ -1016,16 +1023,6 @@ function restoreCompetitorHandoff() {
   if (title && data.sourceTitle && !title.value.trim()) {
     title.value = data.sourceTitle;
   }
-  const instructions = document.getElementById("instructions");
-  if (instructions && !instructions.value.trim()) {
-    instructions.value = buildGapInstructions(data);
-    const badge = document.getElementById("instructions-count");
-    if (badge) {
-      const words = wordCountOf(instructions.value.trim());
-      badge.textContent = words + "/500 words";
-      badge.classList.toggle("over", words > 500);
-    }
-  }
   renderHandoffSummary(data);
 }
 
@@ -1043,87 +1040,19 @@ function readCompetitorHandoffFromStorage() {
   }
 }
 
-function isCleanGapTitle(title) {
-  const text = String(title || "").trim();
-  if (!text || /<[^>]+>/.test(text)) return false;
-  if (text.includes("·") || /^\d+[\.)]/.test(text)) return false;
-  if (/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b.*\d{4}/i.test(text)) {
-    return false;
-  }
-  return true;
-}
-
-function collectHandoffGaps(data) {
-  const lists = [
-    ...(data.keywordGaps || []),
-    ...(data.topicalGaps || []),
-    ...(data.entityGaps || []),
-    ...(data.gaps || []),
-  ];
-  const seen = new Set();
-  const unique = [];
-  lists.forEach((gap) => {
-    const title = String(gap.title || "").trim();
-    if (!title || seen.has(title.toLowerCase()) || !isCleanGapTitle(title)) return;
-    seen.add(title.toLowerCase());
-    unique.push(gap);
-  });
-  (data.paaOpportunities || []).forEach((item) => {
-    if (item.answered) return;
-    const query = String(item.query || "").trim();
-    if (!query) return;
-    unique.push({ title: "Unanswered PAA", description: query });
-  });
-  return unique;
-}
-
-function buildGapInstructions(data) {
-  const clean = collectHandoffGaps(data || {});
-  const scores = data?.oldScores || {};
-  const lines = ["Close these gaps:"];
-  clean.forEach((gap) => {
-    const title = String(gap.title || "").trim();
-    const desc = String(gap.description || "").trim();
-    lines.push(`- ${title}${desc ? ": " + desc : ""}`);
-  });
-  if (scores.seo) {
-    lines.push(`Previous scores: SEO ${scores.seo}, GEO ${scores.geo}, AEO ${scores.aeo}.`);
-  }
-  let text = lines.join("\n");
-  const words = text.trim().split(/\s+/);
-  if (words.length > 500) text = words.slice(0, 500).join(" ");
-  return text.slice(0, 4000);
-}
-
 function renderHandoffSummary(data) {
   const output = document.getElementById("output-body");
   if (!output) return;
   const count = (data.competitors || []).length;
-  const gaps = collectHandoffGaps(data);
-  const gapHtml = gaps.length
-    ? gaps.map((gap) => `<li><strong>${escapeHtml(gap.title)}</strong> — ${escapeHtml(gap.description || "")}</li>`).join("")
-    : "<li>No gap summaries were attached.</li>";
   output.innerHTML = `
     <div class="empty-state" style="align-items:stretch;text-align:left">
       <h3>Ready to rewrite</h3>
-      <p>Source, keyword, and gap notes were loaded from Competitor Analysis.</p>
+      <p>Source and keyword were loaded from Competitor Analysis.</p>
       <div class="meta-card">
         <div class="meta-label">Competitor Results</div>
         <div class="meta-value">${count} pages analyzed</div>
       </div>
-      <div class="meta-card">
-        <div class="meta-label">Content Gaps</div>
-        <ul class="issue-list">${gapHtml}</ul>
-      </div>
     </div>
   `;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 restoreCompetitorHandoff();

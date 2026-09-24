@@ -146,6 +146,29 @@ def check_originality(
     return None
 
 
+def ngram_overlap_ratio(
+    article: str,
+    reference_text: str,
+    ngram_size: int = 8,
+) -> float:
+    article_words = _normalize_for_shingles(article or "")
+    reference_words = _normalize_for_shingles(reference_text or "")
+    if len(article_words) < ngram_size or len(reference_words) < ngram_size:
+        return 0.0
+    reference_shingles = {
+        tuple(reference_words[i:i + ngram_size])
+        for i in range(len(reference_words) - ngram_size + 1)
+    }
+    article_shingles = [
+        tuple(article_words[i:i + ngram_size])
+        for i in range(len(article_words) - ngram_size + 1)
+    ]
+    if not article_shingles:
+        return 0.0
+    overlap_count = sum(1 for shingle in article_shingles if shingle in reference_shingles)
+    return overlap_count / len(article_shingles)
+
+
 def _split_sentences(text: str) -> list[str]:
     raw = re.split(r'(?<=[.!?])\s+', text.strip())
     return [s.strip() for s in raw if len(s.strip()) > 3]

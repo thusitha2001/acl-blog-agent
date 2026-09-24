@@ -6,8 +6,8 @@
 <title>Competitor Analysis · Blog Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/styles.css">
-<link rel="stylesheet" href="/assets/workspace.css">
+<link rel="stylesheet" href="/assets/styles.css?v=ca8">
+<link rel="stylesheet" href="/assets/workspace.css?v=ca8">
 </head>
 <body class="ws" data-page="competitors">
 <div class="workspace">
@@ -38,6 +38,7 @@
       </section>
 
       <section class="ca-card ca-search" aria-label="Search">
+        <div class="ca-search-grid">
         <div class="field-group">
           <label class="field-label" for="ca-blog-url">Blog URL</label>
           <input type="url" id="ca-blog-url" placeholder="https://yoursite.com/blog/your-post" maxlength="500" autocomplete="off">
@@ -47,6 +48,53 @@
           <label class="field-label" for="ca-keyword">Target Keyword <span class="ca-optional">optional</span></label>
           <input type="text" id="ca-keyword" placeholder="e.g. best AI writing tools for ecommerce" maxlength="200" autocomplete="off">
           <p class="field-hint">Leave empty to auto-detect from your blog URL</p>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="ca-country">Target country</label>
+          <select id="ca-country">
+            <option value="us" selected>United States</option>
+            <option value="gb">United Kingdom</option>
+            <option value="in">India</option>
+            <option value="au">Australia</option>
+            <option value="ca">Canada</option>
+            <option value="my">Malaysia</option>
+            <option value="sg">Singapore</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="ca-language">Language</label>
+          <select id="ca-language">
+            <option value="en" selected>English</option>
+            <option value="ta">Tamil</option>
+            <option value="hi">Hindi</option>
+            <option value="es">Spanish</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="ca-count">Competitors to analyze</label>
+          <select id="ca-count">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+          </select>
+        </div>
+        </div>
+        <div class="field-group ca-url-field">
+          <div class="ca-url-head">
+            <span class="field-label" id="ca-competitor-urls-label">Competitor URLs</span>
+            <span class="ca-url-meta" id="ca-url-meta">0 of 10 added · optional · auto-finds ranking pages if empty</span>
+          </div>
+          <div class="ca-url-box">
+            <div class="ca-url-list" id="ca-url-list" role="group" aria-labelledby="ca-competitor-urls-label"></div>
+            <button type="button" class="ca-url-add" id="ca-url-add">
+              <span aria-hidden="true">+</span>
+              Add another URL
+            </button>
+          </div>
+          <p class="field-hint">Leave empty to auto-find 5 ranking pages from live search</p>
         </div>
         <div class="ca-search-foot">
           <p class="ca-live" id="ca-live">
@@ -70,8 +118,12 @@
           <span data-stage="competitors">Analyzing competitors</span>
           <span class="ca-progress-arrow" aria-hidden="true">→</span>
           <span data-stage="scoring">Scoring</span>
+          <span class="ca-progress-arrow" aria-hidden="true">→</span>
+          <span data-stage="report">Report</span>
         </div>
       </div>
+
+      <section class="ca-card ca-yours" id="ca-yours" hidden></section>
 
       <div class="ca-grid">
         <section class="ca-card ca-competitors" aria-label="Ranking competitors">
@@ -94,57 +146,32 @@
             <div class="ca-empty" id="ca-comp-empty">Run an analysis to see ranking competitors here</div>
           </div>
         </section>
-
-        <div class="ca-side">
-          <section class="ca-card" aria-label="Search intent">
-            <header class="ca-card-head ca-card-head-tight">
-              <div>
-                <p class="ca-mini-label">Search intent</p>
-                <h2 id="ca-intent-heading">Readers are comparing</h2>
-              </div>
-              <span class="ca-card-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 2 4-6"/></svg>
-              </span>
-            </header>
-            <div id="ca-intent-body">
-              <div class="ca-empty">Search intent will appear here after analysis</div>
-            </div>
-          </section>
-
-          <section class="ca-card" aria-label="Your blog vs competitors">
-            <h2>Your Blog vs Competitors</h2>
-            <div id="ca-compare-body">
-              <div class="ca-empty">Enter your blog URL above to see how it compares</div>
-            </div>
-            <button type="button" class="ca-text-link" id="ca-full-compare" hidden>View full comparison →</button>
-          </section>
-
-          <section class="ca-card" aria-label="Content gaps">
-            <h2>Content Gaps</h2>
-            <div id="ca-gaps-body">
-              <div class="ca-empty">Gaps will appear here after analysis</div>
-            </div>
-          </section>
-
-          <section class="ca-card" aria-label="PAA opportunities">
-            <h2>PAA opportunities</h2>
-            <div id="ca-paa-body">
-              <div class="ca-empty">Question queries will appear here after analysis</div>
-            </div>
-          </section>
-
-          <section class="ca-card" aria-label="Recommended structure">
-            <h2>Recommended structure</h2>
-            <div id="ca-structure-body">
-              <div class="ca-empty">A suggested outline will appear here after analysis</div>
-            </div>
-          </section>
-        </div>
       </div>
+
+      <section class="ca-card ca-dash" id="ca-dashboard" hidden>
+        <header class="ca-card-head">
+          <div>
+            <h2>Analysis dashboard</h2>
+            <p>On-page checklist vs ranking pages. Third-party traffic, DA, and volume are labeled Data unavailable.</p>
+          </div>
+          <div class="ca-export">
+            <button type="button" class="ca-export-btn" data-export="json">JSON</button>
+            <button type="button" class="ca-export-btn" data-export="csv">CSV</button>
+            <button type="button" class="ca-export-btn" data-export="md">Markdown</button>
+            <button type="button" class="ca-export-btn" data-export="pdf">Print / PDF</button>
+          </div>
+        </header>
+        <div class="ca-dash-filters">
+          <label>Priority <select id="ca-filter-priority"><option value="">All</option><option>Critical</option><option>High Priority</option><option>Medium Priority</option><option>Low Priority</option></select></label>
+          <label>Keyword type <select id="ca-filter-kwtype"><option value="">All</option><option>primary</option><option>secondary</option><option>long-tail</option><option>question</option><option>entity</option><option>commercial_modifier</option><option>intent_mismatch</option></select></label>
+          <label>Intent <select id="ca-filter-intent"><option value="">All</option><option>informational</option><option>commercial</option><option>transactional</option></select></label>
+        </div>
+        <div id="ca-dash-body"></div>
+      </section>
     </main>
   </div>
 </div>
-<script src="/assets/workspace.js"></script>
-<script src="/assets/competitors.js"></script>
+<script src="/assets/workspace.js?v=ca8"></script>
+<script src="/assets/competitors.js?v=ca8"></script>
 </body>
 </html>

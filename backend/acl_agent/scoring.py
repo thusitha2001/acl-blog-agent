@@ -1,19 +1,20 @@
 """
 ACL Blog Agent - SEO, GEO, and AEO scoring.
 
-Deterministic, code-based scores (0-100) so users can evaluate
-and optimize a generated article:
+Deterministic on-page readiness checklist (0-100). These scores
+measure whether the draft is structured the way SEO / AEO / GEO
+best practices describe — not live rank, AI-citation rate, or
+Core Web Vitals.
 
-- SEO: classic on-page search ranking signals
-- GEO: Generative Engine Optimization (AI Overviews, ChatGPT,
-  Perplexity, Gemini citations)
-- AEO: Answer Engine Optimization (featured snippets, People
-  Also Ask, voice answers)
+- SEO: on-page search signals (placement, metadata, structure)
+- GEO: citation-readiness for generative engines (extractable
+  answers, specifics) — not whether ChatGPT/Perplexity cite it
+- AEO: snippet / PAA / voice readiness from the text itself
 """
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from acl_agent.models import ContentBrief, InternalLink, SEOAnalysis
@@ -42,28 +43,40 @@ def _factor(
     maximum: int,
     note: str,
     tip: str = "",
+    status: str = "available",
 ) -> dict[str, Any]:
     earned = max(0, min(maximum, int(score)))
     return {
         "name": name,
-        "score": earned,
+        "score": earned if status == "available" else None,
         "max": maximum,
-        "passed": earned >= maximum,
+        "passed": status == "available" and earned >= maximum,
         "note": note,
-        "tip": tip if earned < maximum else "",
+        "tip": tip if status == "available" and earned < maximum else "",
+        "status": status,
     }
 
 
-def _pack(label: str, summary: str, factors: list[dict[str, Any]]) -> dict[str, Any]:
-    total = min(100, sum(int(f["score"]) for f in factors))
-    tips = [f["tip"] for f in factors if f.get("tip")]
+def _pack(label: str, summary: str, factors: list[dict[str, Any]], confidence: str = "medium") -> dict[str, Any]:
+    usable = [f for f in factors if f.get("status") != "unavailable"]
+    earned = sum(int(f["score"] or 0) for f in usable)
+    maximum = sum(int(f["max"]) for f in usable)
+    total = 0 if maximum <= 0 else int(round(100 * earned / maximum))
+    total = max(0, min(100, total))
+    tips = [f["tip"] for f in usable if f.get("tip")]
+    notes = [f["note"] for f in factors if f.get("note")]
     return {
         "label": label,
         "summary": summary,
         "score": total,
         "grade": _grade(total),
+        "status": "available" if usable else "unavailable",
         "factors": factors,
+        "notes": notes[:8],
         "tips": tips[:6],
+        "confidence": confidence,
+        "earned_points": earned,
+        "max_points": maximum,
     }
 
 
@@ -142,9 +155,40 @@ def _h1_text(article: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+_ENTITY_STOP = {
+    "the", "this", "that", "these", "those", "there", "then", "than",
+    "when", "what", "where", "which", "while", "after", "before",
+    "however", "therefore", "furthermore", "meanwhile", "instead",
+    "although", "because", "according", "including", "using", "during",
+    "chapter", "section", "table", "figure", "introduction", "conclusion",
+}
+
+
+def _title_case_heading_line(line: str) -> bool:
+    words = re.findall(r"[A-Za-z]+", line)
+    if not 2 <= len(words) <= 14:
+        return False
+    titled = sum(1 for word in words if word[:1].isupper())
+    return titled / len(words) >= 0.8
+
+
 def _named_entities(text: str) -> int:
-    # Consecutive Capitalized Words as a cheap entity proxy.
-    return len(re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", text))
+    """Capitalization proxy, not NER. Skips title-case heading lines."""
+    found: set[str] = set()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or _title_case_heading_line(line):
+            continue
+        for match in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", line):
+            found.add(match)
+        for match in re.finditer(
+            r"(?<=[a-z0-9,;:'\"”)\]]\s)\b([A-Z][a-z]{2,})\b",
+            line,
+        ):
+            word = match.group(1)
+            if word.lower() not in _ENTITY_STOP:
+                found.add(word)
+    return len(found)
 
 
 def _question_heading(heading: str) -> bool:
@@ -160,13 +204,26 @@ def _question_heading(heading: str) -> bool:
 
 
 def _definition_pattern(text: str, keyword: str) -> bool:
-    escaped = re.escape(keyword)
-    patterns = [
-        rf"\b{escaped}\s+(?:is|are|means|refers to)\b",
-        r"\b(?:is|are)\s+(?:a|an|the)\b",
-    ]
-    lowered = text.lower()
-    return any(re.search(p, lowered) for p in patterns)
+    """True only when the keyword itself is defined — not any English 'is a' clause."""
+    phrase = " ".join((keyword or "").split())
+    if not phrase:
+        return False
+    escaped = re.escape(phrase.lower())
+    lowered = " ".join((text or "").lower().split())
+    return bool(re.search(rf"\b{escaped}\s+(?:is|are|means|refers to)\b", lowered))
+
+
+def _covers_reader_question(question: str, blocks: list[str]) -> bool:
+    tokens = [t for t in re.findall(r"[a-z0-9']+", (question or "").lower()) if len(t) > 4]
+    if len(tokens) < 2:
+        return False
+    need = max(2, (len(tokens) + 1) // 2)
+    for block in blocks:
+        blob = (block or "").lower()
+        hits = sum(1 for token in tokens if token in blob)
+        if hits >= need:
+            return True
+    return False
 
 
 def _score_seo(
@@ -398,7 +455,7 @@ def _score_seo(
 
     return _pack(
         "SEO",
-        "On-page search signals: keyword placement, metadata, structure, and links.",
+        "On-page search checklist: keyword placement, metadata, structure, and links — not rank or backlinks.",
         [
             h1_factor,
             open_factor,
@@ -520,14 +577,14 @@ def _score_geo(
             "Citable specifics",
             12,
             12,
-            f"{numbers} numeric details and {entities} named entities.",
+            f"{numbers} numeric details and {entities} capitalized-name proxies (not NER).",
         )
     elif specifics >= 5:
         spec_factor = _factor(
             "Citable specifics",
             7,
             12,
-            f"{numbers} numeric details and {entities} named entities.",
+            f"{numbers} numeric details and {entities} capitalized-name proxies (not NER).",
             "Add more concrete names, measurements, or examples AI systems can cite.",
         )
     else:
@@ -632,42 +689,48 @@ def _score_geo(
         )
 
     depth_patterns = [
-        r"it depends",
-        r"trade-?off",
-        r"honest",
-        r"most people",
-        r"the catch",
-        r"rather than",
-        r"skip\b",
+        r"\bit depends\b",
+        r"\btrade-?offs?\b",
+        r"\bthe catch\b",
+        r"\brather than\b",
+        r"\bskip (?:this|that|the|them)\b",
+        r"\b(?:i|we) (?:recommend|prefer|would(?:n't)?)\b",
+        r"\bworth it (?:if|when)\b",
+        r"\bdon't bother\b",
     ]
-    depth = sum(1 for p in depth_patterns if re.search(p, lowered))
+    depth = 0
+    for sentence in re.split(r"(?<=[.!?])\s+", lowered):
+        if len(sentence.split()) < 10:
+            continue
+        if any(re.search(pattern, sentence) for pattern in depth_patterns):
+            depth += 1
     if depth >= 2:
         depth_factor = _factor(
-            "Original editorial angle",
+            "Editorial judgment language",
             11,
             11,
-            "Copy includes judgment, trade-offs, or a distinct point of view.",
+            "Phrase-level proxy for a distinct take — not a true originality check.",
         )
     elif depth == 1:
         depth_factor = _factor(
-            "Original editorial angle",
+            "Editorial judgment language",
             6,
             11,
-            "Some editorial judgment is present.",
+            "Some judgment phrasing is present (proxy, not proof of a unique angle).",
             "Add a clear take: what to skip, a trade-off, or when the usual advice fails.",
         )
     else:
         depth_factor = _factor(
-            "Original editorial angle",
+            "Editorial judgment language",
             3,
             11,
-            "The article reads generic rather than opinionated.",
+            "No judgment phrasing detected (this is a phrase proxy, not NER).",
             "State a unique angle so AI engines have a reason to cite you over competitors.",
         )
 
     return _pack(
         "GEO",
-        "How easily generative engines can extract, cite, and trust this article.",
+        "On-page citation-readiness for generative engines — not live ChatGPT/Perplexity citation rate.",
         [
             answer_factor,
             section_factor,
@@ -805,7 +868,7 @@ def _score_aeo(
             "Definition snippet",
             12,
             12,
-            "Opening includes a definition-style statement.",
+            "Opening includes a definition of the primary keyword.",
         )
     else:
         def_factor = _factor(
@@ -843,31 +906,28 @@ def _score_aeo(
         )
 
     questions = brief.reader_questions or []
-    answered = 0
-    article_lower = article.lower()
-    faq_text = " ".join(
-        f"{f.get('question', '')} {f.get('answer', '')}" for f in faqs
-    ).lower()
-    for q in questions:
-        tokens = [t for t in re.findall(r"[a-z0-9']+", q.lower()) if len(t) > 3]
-        if not tokens:
-            continue
-        hits = sum(1 for t in tokens if t in article_lower or t in faq_text)
-        if hits >= max(2, len(tokens) // 2):
-            answered += 1
+    blocks = (
+        headings
+        + [p.strip() for p in re.split(r"\n\s*\n", plain) if p.strip()]
+        + [
+            f"{item.get('question', '')} {item.get('answer', '')}"
+            for item in faqs
+        ]
+    )
+    answered = sum(1 for question in questions if _covers_reader_question(question, blocks))
     if questions and answered >= min(2, len(questions)):
         rq_factor = _factor(
             "Reader questions answered",
             11,
             11,
-            f"{answered}/{len(questions)} planned reader questions are covered.",
+            f"{answered}/{len(questions)} planned reader questions have same-block token overlap (rough gate).",
         )
     elif questions and answered:
         rq_factor = _factor(
             "Reader questions answered",
             6,
             11,
-            f"{answered}/{len(questions)} reader questions covered.",
+            f"{answered}/{len(questions)} reader questions have same-block overlap (rough gate, not ground truth).",
             "Answer each reader question in a heading, paragraph, or FAQ.",
         )
     elif questions:
@@ -875,7 +935,7 @@ def _score_aeo(
             "Reader questions answered",
             2,
             11,
-            "Planned reader questions are not clearly answered.",
+            "Planned reader questions are not clearly answered in a heading, paragraph, or FAQ.",
             "Mirror People Also Ask phrasing in H2s and FAQs.",
         )
     else:
@@ -914,7 +974,7 @@ def _score_aeo(
 
     return _pack(
         "AEO",
-        "Fit for featured snippets, People Also Ask, and voice answers.",
+        "On-page snippet / People Also Ask / voice readiness — not a prediction of featured-snippet wins.",
         [
             qh_factor,
             imm_factor,
@@ -928,19 +988,110 @@ def _score_aeo(
     )
 
 
+def _score_aio(
+    article: str,
+    brief: ContentBrief,
+    seo: SEOAnalysis,
+    signals: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    signals = signals or {}
+    plain = _plain_text(article)
+    opening = _first_n_words(plain, 80)
+    h2s = _headings(article, 2)
+    entities = _named_entities(plain)
+    has_summary = 25 <= len(opening.split()) <= 90
+    numbers = len(re.findall(r"\b\d+(?:[.,]\d+)?\b", plain))
+    schema = signals.get("schema_types") or []
+    author = signals.get("author") or ""
+    factors = [
+        _factor("Entity clarity", 12 if entities >= 6 else (6 if entities else 2), 12, f"{entities} capitalized-name proxies.", "Name places, products, or people AI systems can attach to."),
+        _factor("Factual clarity", 12 if numbers >= 8 else (6 if numbers else 2), 12, f"{numbers} numeric details.", "Add dated, sourced figures — never invent them."),
+        _factor("Structured formatting", 12 if (_has_list(article) or _has_table(article)) else 4, 12, "Lists/tables present." if _has_list(article) or _has_table(article) else "No list or table.", "Add a comparison table or steps list."),
+        _factor("Direct answer quality", 12 if len(h2s) >= 3 else 5, 12, f"{len(h2s)} H2s that can host direct answers.", "Lead each H2 with a 1–2 sentence answer."),
+        _factor("Summary quality", 12 if has_summary else 5, 12, "Opening can stand alone." if has_summary else "No short standalone summary.", "Write a 40–60 word answer under the H1."),
+        _factor("Quotable statements", 10 if re.search(r"\b(i recommend|the catch|rather than|in practice)\b", plain.lower()) else 4, 10, "Judgment phrasing found." if re.search(r"\b(i recommend|the catch|rather than|in practice)\b", plain.lower()) else "Few quotable takes.", "Add one specific, reusable recommendation."),
+        _factor("Original insights", 10 if re.search(r"\b(i recommend|it depends|the catch|rather than)\b", plain.lower()) else 4, 10, "Point-of-view language found." if re.search(r"\bit depends\b", plain.lower()) else "Little original take detected.", "State a clear point of view."),
+        _factor("Citation-ready claims", 10 if numbers >= 4 else 3, 10, "Numeric or dated claims that can be sourced." if numbers else "Few citation-ready claims.", "Attach a source to each statistic."),
+        _factor(
+            "Author and trust signals",
+            10 if (author or schema) else 0,
+            10,
+            "Author or schema detected." if author or schema else "Author/schema not present in this extract.",
+            "Show an author and Article/FAQ schema.",
+            status="available" if (author or schema or article) else "unavailable",
+        ),
+    ]
+    packed = _pack(
+        "AIO",
+        "AI-search structure and citation-readiness — not live AI visibility.",
+        factors,
+        confidence="high" if len(plain.split()) >= 120 else "medium",
+    )
+    return packed
+
+
+def _score_sxo(
+    article: str,
+    brief: ContentBrief,
+    seo: SEOAnalysis,
+    signals: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    plain = _plain_text(article)
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", plain) if s.strip()]
+    avg = (sum(len(s.split()) for s in sentences) / len(sentences)) if sentences else 0
+    h2s = _headings(article, 2)
+    has_toc = bool(re.search(r"table of contents|in this (guide|article)", article, re.I))
+    intro = _first_n_words(plain, 60)
+    intro_ok = 20 <= len(intro.split()) <= 80
+    title_ok = 20 <= len((brief.title or "").strip()) <= 70
+    paras = [p.strip() for p in re.split(r"\n\s*\n", plain) if p.strip()]
+    para_avg = (sum(len(p.split()) for p in paras) / len(paras)) if paras else 0
+    intent_ok = bool(brief.primary_keyword) and brief.primary_keyword.split()[0].lower() in plain.lower()
+    scannable = _has_list(article) or len(h2s) >= 4
+    factors = [
+        _factor("Search intent match", 14 if intent_ok else 6, 14, "Opening stays on the target query." if intent_ok else "Intent is unclear in the extract.", "Restate the reader job in the first two sentences."),
+        _factor("Title quality", 12 if title_ok else 6, 12, "Title length is snippet-friendly." if title_ok else "Title is missing, short, or bloated.", "Keep the title specific and under ~70 characters."),
+        _factor("Introduction quality", 14 if intro_ok else 6, 14, "Intro is snippet-sized." if intro_ok else "Intro is missing or bloated.", "Open with the reader outcome in 2 sentences."),
+        _factor("Heading structure", 12 if len(h2s) >= 4 else 5, 12, f"{len(h2s)} H2s.", "Use 4–8 descriptive H2s."),
+        _factor("Scannability", 12 if scannable else 5, 12, "Headings/lists help scanning." if scannable else "Wall of text risk.", "Add H2s and a list of takeaways."),
+        _factor("Paragraph length", 12 if para_avg and para_avg <= 80 else 6, 12, f"Average paragraph {para_avg:.0f} words." if paras else "Paragraphs could not be split.", "Keep paragraphs under ~60 words."),
+        _factor("Lists and tables", 12 if (_has_list(article) or _has_table(article)) else 4, 12, "Lists or tables present." if _has_list(article) or _has_table(article) else "No list or table.", "Add a comparison table or steps list."),
+        _factor("Navigation", 12 if has_toc or len(h2s) >= 5 else 5, 12, "TOC or many H2s." if has_toc or len(h2s) >= 5 else "No table of contents.", "Add a jump-link table of contents."),
+        _factor("FAQ coverage", 12 if seo.faqs else 4, 12, "FAQ present." if seo.faqs else "No FAQ.", "Answer remaining questions in a FAQ."),
+        _factor("CTA relevance", 12 if re.search(r"\b(start|book|try|download|read next|check|shop)\b", plain.lower()) else 5, 12, "A next step is suggested." if re.search(r"\b(start|book|try|check)\b", plain.lower()) else "No clear next step.", "End with one relevant action."),
+        _factor("Mobile reading signals", 12 if avg and avg <= 24 and len(h2s) >= 3 else 5, 12, "Short blocks + headings." if avg and avg <= 24 else "Long blocks on mobile.", "Keep paragraphs under ~60 words."),
+    ]
+    return _pack(
+        "SXO",
+        "Search-experience / scanability checklist — not a UX lab measurement.",
+        factors,
+        confidence="high" if len(plain.split()) >= 120 else "medium",
+    )
+
+
 def score_article(
     article: str,
     brief: ContentBrief,
     seo: SEOAnalysis,
+    signals: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
-    Return SEO, GEO, and AEO score reports plus an overall average.
+    Return SEO, GEO, AEO, AIO, and SXO checklist reports plus overall.
     """
     seo_report = _score_seo(article, brief, seo)
     geo_report = _score_geo(article, brief, seo)
     aeo_report = _score_aeo(article, brief, seo)
+    aio_report = _score_aio(article, brief, seo, signals)
+    sxo_report = _score_sxo(article, brief, seo, signals)
     overall = round(
-        (seo_report["score"] + geo_report["score"] + aeo_report["score"]) / 3
+        (
+            seo_report["score"]
+            + geo_report["score"]
+            + aeo_report["score"]
+            + aio_report["score"]
+            + sxo_report["score"]
+        )
+        / 5
     )
     return {
         "overall": overall,
@@ -948,6 +1099,8 @@ def score_article(
         "seo": seo_report,
         "geo": geo_report,
         "aeo": aeo_report,
+        "aio": aio_report,
+        "sxo": sxo_report,
     }
 
 

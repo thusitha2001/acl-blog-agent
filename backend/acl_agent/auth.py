@@ -99,8 +99,9 @@ def signup_user(name: str, password: str) -> dict:
 
 def login_user(name: str, password: str) -> dict | None:
     """
-    Authenticates an existing user. Returns a fresh token payload
-    on success, or None on bad credentials.
+    Authenticates an existing user. Returns the session payload
+    on success, or None on bad credentials. Reuses the current
+    token so other open tabs stay signed in.
     """
     name = (name or "").strip()
 
@@ -122,14 +123,17 @@ def login_user(name: str, password: str) -> dict | None:
         ):
             return None
 
-        record["token"] = secrets.token_hex(24)
-        _save_users(users)
+        token = (record.get("token") or "").strip()
+        if len(token) != 48:
+            record["token"] = secrets.token_hex(24)
+            _save_users(users)
+            token = record["token"]
 
         logger.info("User logged in: %s (%s)", record["name"], record["user_id"])
         return {
             "user_id": record["user_id"],
             "name": record["name"],
-            "token": record["token"],
+            "token": token,
         }
 
 

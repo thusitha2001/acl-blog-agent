@@ -28,9 +28,9 @@
   let lastSyncedTitle = "";
 
   const SCORE_COPY = {
-    seo: "On-page search signals: keyword placement, metadata, structure, and links.",
-    geo: "How easily generative engines can extract, cite, and trust this article.",
-    aeo: "Fit for featured snippets, People Also Ask, and voice answers.",
+    seo: "On-page search checklist — not rank, backlinks, or Core Web Vitals.",
+    geo: "Citation-readiness from the text — not whether ChatGPT or Perplexity actually cite the page.",
+    aeo: "Snippet / PAA / voice readiness from structure — not a featured-snippet prediction.",
   };
 
   function escapeHtml(value) {
@@ -333,6 +333,10 @@
           secondary_keywords: secondary,
         }),
       });
+      if (response.status === 401) {
+        window.BlogAgentAuth?.handleUnauthorized?.();
+        return;
+      }
       if (response.ok) {
         const data = await response.json();
         if (data.scores) scores = data.scores;

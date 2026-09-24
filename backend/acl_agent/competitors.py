@@ -1,10 +1,12 @@
 """
 Competitor analysis: scrape a source blog, run a live SERP snapshot,
-score ranking pages, and surface search intent plus content gaps.
+and score ranking pages.
 """
 from __future__ import annotations
 
+import json
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -14,9 +16,33 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from acl_agent.auto_brief import analyze_serp
+from acl_agent.auto_brief import (
+    SERPResult,
+    analyze_serp,
+    extract_headings_from_snippets,
+    extract_nlp_keywords,
+    search_serp,
+)
+from acl_agent.analysis_input import (
+    analysis_mode,
+    average_competitor_scores,
+    detect_keyword_from_article,
+    page_full_text,
+    validate_blog_url,
+)
+from acl_agent.analysis_report import (
+    action_plan,
+    citation_opportunities,
+    content_gaps,
+    humanization_report,
+    originality_report,
+    traffic_reasons,
+)
 from acl_agent.config import logger
+from acl_agent.keywords import article_intent, classify_page_intent, compare_keywords
+from acl_agent.metrics import UNAVAILABLE
 from acl_agent.models import ContentBrief, SEOAnalysis
+from acl_agent.readability import analyze_readability
 from acl_agent.scoring import score_article
 from acl_agent.validation import word_count as count_words
 
@@ -57,22 +83,10 @@ HIGH_AUTHORITY_HOSTS = {
     "oracle.com",
 }
 
-COMMERCIAL_TERMS = (
-    "best", "vs", "versus", "compare", "comparison", "review",
-    "top", "tools", "software", "pricing", "price", "buy",
-    "alternative", "alternatives", "for", "ecommerce", "shopify",
-)
-INFO_TERMS = (
-    "how", "what", "why", "guide", "tutorial", "learn",
-    "explained", "tips", "examples", "meaning", "definition",
-)
-NAV_TERMS = (
-    "login", "official", "homepage", "home", "about", "contact",
-    "docs", "documentation", "app",
-)
 USER_AGENT = (
-    "Mozilla/5.0 (compatible; ACLBlogAgent/1.0; "
-    "+https://blog-agent.local)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/128.0.0.0 Safari/537.36"
 )
 
 
@@ -96,6 +110,33 @@ def _same_site(url_a: str, url_b: str) -> bool:
     if not a or not b:
         return False
     return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def _url_key(url: str) -> tuple[str, str]:
+    parsed = urlparse(url or "")
+    return (_host(url), parsed.path.rstrip("/").lower())
+
+
+def _normalize_competitor_urls(raw: Optional[list[str]]) -> list[str]:
+    urls: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw or []:
+        url = " ".join(str(item or "").split())
+        if not url:
+            continue
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            url = "https://" + url
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        key = _url_key(url)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+        if len(urls) >= 10:
+            break
+    return urls
 
 
 def _favicon(url: str) -> str:
@@ -134,7 +175,7 @@ def _content_type(title: str, text: str) -> str:
 
 def _relative_updated(dt: Optional[datetime]) -> str:
     if not dt:
-        return "Updated recently"
+        return "Unknown"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     days = max(0, (datetime.now(timezone.utc) - dt).days)
@@ -158,8 +199,21 @@ def _relative_updated(dt: Optional[datetime]) -> str:
 def _parse_datetime(value: str) -> Optional[datetime]:
     if not value:
         return None
+    raw = str(value).strip()
+    if not raw:
+        return None
     try:
-        return parsedate_to_datetime(value)
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        pass
+    try:
+        parsed = parsedate_to_datetime(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
     except Exception:
         pass
     for fmt in (
@@ -169,66 +223,80 @@ def _parse_datetime(value: str) -> Optional[datetime]:
         "%Y-%m-%d",
     ):
         try:
-            parsed = datetime.strptime(value.replace("Z", "+0000"), fmt)
+            parsed = datetime.strptime(raw.replace("Z", "+0000"), fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
             return parsed
         except Exception:
             continue
     return None
 
 
-def _detect_keyword(title: str, h1: str, url: str) -> str:
-    raw = (h1 or title or "").strip()
-    raw = re.split(r"\s*[|\u2013\u2014]\s*", raw)[0]
+def _slug_keyword(url: str) -> str:
+    path = urlparse(url).path.rstrip("/").split("/")[-1]
+    slug = re.sub(r"[-_]+", " ", path)
+    slug = re.sub(r"[^a-zA-Z0-9 ]+", " ", slug)
+    skip = {
+        "html", "php", "aspx", "index", "a", "an", "the", "and", "or", "for",
+        "of", "to", "in", "on", "with", "create", "creating", "collections",
+        "collection", "complete", "ultimate", "guide", "ideas", "idea",
+        "setting", "blog", "news", "post", "how", "your", "our",
+    }
+    tokens = [
+        token.lower()
+        for token in slug.split()
+        if len(token) > 1 and token.lower() not in skip
+    ]
+    if len(tokens) >= 2:
+        return " ".join(tokens[:6])
+    return ""
+
+
+def _phrase_keyword(text: str) -> str:
+    raw = re.split(r"\s*[:|\u2013\u2014]\s*", (text or "").strip())[0]
     raw = re.sub(
-        r"^(how to|the complete|ultimate|a complete|complete)\s+",
+        r"^(how to|the complete|ultimate|a complete|complete|best)\s+",
         "",
         raw,
         flags=re.IGNORECASE,
     )
-    raw = re.sub(r"\s+", " ", raw).strip(" -:|")
-    if len(raw) >= 3:
-        return raw[:80]
-    path = urlparse(url).path.rstrip("/").split("/")[-1]
-    slug = re.sub(r"[-_]+", " ", path).strip()
-    return slug[:80]
+    words = re.findall(r"[A-Za-z0-9']+", raw)
+    if len(words) >= 2:
+        return " ".join(words[:7]).lower()
+    return ""
 
 
-def _count_hits(text: str, terms: tuple[str, ...]) -> int:
-    lowered = text.lower()
-    return sum(1 for term in terms if re.search(rf"\b{re.escape(term)}\b", lowered))
+def _shorten_query(keyword: str) -> str:
+    phrase = _phrase_keyword(keyword)
+    if phrase and phrase.lower() != keyword.lower():
+        return phrase
+    words = re.findall(r"[A-Za-z0-9']+", keyword or "")
+    if len(words) > 6:
+        return " ".join(words[:6]).lower()
+    return (keyword or "").strip()
 
 
-def _intent_weights(text: str) -> dict[str, int]:
-    commercial = _count_hits(text, COMMERCIAL_TERMS) + 1
-    informational = _count_hits(text, INFO_TERMS) + 1
-    navigational = _count_hits(text, NAV_TERMS) + 1
-    return {
-        "commercial": commercial,
-        "informational": informational,
-        "navigational": navigational,
-    }
-
-
-def _normalize_intents(weights: dict[str, int]) -> dict[str, int]:
-    commercial = max(0, weights.get("commercial", 0))
-    informational = max(0, weights.get("informational", 0))
-    navigational = max(0, weights.get("navigational", 0))
-    total = commercial + informational + navigational or 1
-    commercial = round(commercial / total * 100)
-    informational = round(informational / total * 100)
-    navigational = max(0, 100 - commercial - informational)
-    return {
-        "commercial": commercial,
-        "informational": informational,
-        "navigational": navigational,
-    }
+def _detect_keyword(title: str, h1: str, url: str) -> str:
+    """Prefer the URL slug (actual query shape) over a long marketing title."""
+    slug = _slug_keyword(url)
+    if slug:
+        return slug[:80]
+    for source in (h1, title):
+        phrase = _phrase_keyword(source)
+        if phrase:
+            return phrase[:80]
+    return (slug or "blog article")[:80]
 
 
 def _fetch_html(url: str) -> tuple[str, dict[str, str]]:
     response = requests.get(
         url,
         timeout=12,
-        headers={"User-Agent": USER_AGENT},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
         allow_redirects=True,
     )
     response.raise_for_status()
@@ -271,7 +339,9 @@ _CHROME_TAGS = [
 _CHROME_HINT = re.compile(
     r"(announcement|mega-menu|menu-drawer|cart-drawer|predictive-search|"
     r"header-wrapper|breadcrumb|site-nav|toolbar|newsletter|cookie|"
-    r"popup|modal|drawer|skip-to-content|visually-hidden)",
+    r"popup|modal|drawer|skip-to-content|visually-hidden|"
+    r"comment-body|comments-area|comment-list|comment-content|comment-entry|"
+    r"pingback|related-posts|elementor-location-header|elementor-location-footer)",
     re.IGNORECASE,
 )
 _CONTENT_SELECTORS = [
@@ -283,8 +353,12 @@ _CONTENT_SELECTORS = [
     ".article-body",
     ".post-content",
     ".entry-content",
+    ".elementor-location-single",
+    ".elementor-widget-container",
+    ".content-area",
     "article .rte",
     "div.rte",
+    "[role='main']",
     "article",
     "main",
 ]
@@ -294,42 +368,78 @@ def _strip_chrome(root) -> None:
     if root is None:
         return
     for tag in list(root.find_all(_CHROME_TAGS)):
-        tag.decompose()
+        if tag is not None:
+            tag.decompose()
     for tag in list(root.find_all(True)):
-        blob = " ".join(tag.get("class") or []) + " " + (tag.get("id") or "")
+        if tag is None or getattr(tag, "attrs", None) is None:
+            continue
+        blob = " ".join(tag.get("class") or []) + " " + str(tag.get("id") or "")
         name = (tag.name or "").lower()
         if name in {"header"} and not tag.find_parent("article"):
             tag.decompose()
             continue
         if _CHROME_HINT.search(blob):
             tag.decompose()
+            continue
+        if name == "article" and re.search(r"\bcomment\b", blob, re.I):
+            tag.decompose()
+
+
+def _measurable_text(node) -> str:
+    if node is None:
+        return ""
+    probe = BeautifulSoup(str(node), "html.parser")
+    _strip_chrome(probe)
+    return probe.get_text(" ", strip=True)
+
+
+def _looks_like_comment_node(node) -> bool:
+    if node is None or getattr(node, "attrs", None) is None:
+        return False
+    blob = " ".join(node.get("class") or []) + " " + str(node.get("id") or "")
+    return bool(re.search(r"\bcomments?\b", blob, re.I))
 
 
 def _content_root(soup):
+    best = None
+    best_words = 0
+    seen: set[int] = set()
+    nodes: list[Any] = []
     for selector in _CONTENT_SELECTORS:
         try:
-            node = soup.select_one(selector)
+            found = soup.select(selector)
         except Exception:
-            node = None
+            found = []
+        nodes.extend(found)
+    widgets = soup.select(".elementor-widget-container")
+    if len(widgets) >= 2:
+        wrap = BeautifulSoup("<div class='elementor-aggregate'></div>", "html.parser").div
+        for widget in widgets:
+            wrap.append(BeautifulSoup(str(widget), "html.parser"))
+        nodes.append(wrap)
+    for node in nodes:
         if node is None:
             continue
-        if getattr(node, "name", "") != "article":
-            parent_article = node.find_parent("article")
-            if parent_article is not None and parent_article.find(["h1", "h2"]):
-                node = parent_article
-        probe = BeautifulSoup(str(node), "html.parser")
-        _strip_chrome(probe)
-        text = probe.get_text(" ", strip=True)
-        if count_words(text) >= 80:
-            return node
-    return soup.find("article") or soup.find("main") or soup.body or soup
+        marker = id(node)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if _looks_like_comment_node(node):
+            continue
+        words = count_words(_measurable_text(node))
+        if words > best_words:
+            best_words = words
+            best = node
+    if best is not None and best_words >= 80:
+        return best
+    return soup.find("main") or soup.body or soup
 
 
 def _html_to_markdown(root) -> str:
     if root is None:
         return ""
     chunks: list[str] = []
-    for el in root.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote"]):
+    for el in root.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote", "div"]):
         name = (el.name or "").lower()
         if name == "p" and el.find_parent(["li", "h1", "h2", "h3", "h4", "blockquote"]):
             continue
@@ -348,6 +458,12 @@ def _html_to_markdown(root) -> str:
             chunks.append(f"- {text}")
         elif name == "blockquote":
             chunks.append(f"> {text}")
+        elif name == "div":
+            if el.find(["p", "h1", "h2", "h3", "h4", "li", "blockquote", "div"]):
+                continue
+            if len(text.split()) < 8:
+                continue
+            chunks.append(text)
         else:
             chunks.append(text)
     return "\n\n".join(chunks)
@@ -363,21 +479,274 @@ def _extract_readable_article(soup) -> tuple[str, Any]:
     return markdown, cleaned, words
 
 
+_QUESTION_START = re.compile(
+    r"^(how|what|why|is|does|can|when|where|who|which|should|are|do|will)\b",
+    re.IGNORECASE,
+)
+
+
+def _jsonld_types(soup) -> list[str]:
+    types: list[str] = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text() or ""
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        stack = data if isinstance(data, list) else [data]
+        for item in stack:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("@type")
+            if isinstance(value, list):
+                types.extend(str(part) for part in value if part)
+            elif value:
+                types.append(str(value))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in types:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _walk_jsonld(node: Any):
+    if isinstance(node, list):
+        for item in node:
+            yield from _walk_jsonld(item)
+        return
+    if not isinstance(node, dict):
+        return
+    yield node
+    if "@graph" in node:
+        yield from _walk_jsonld(node.get("@graph"))
+
+
+def _jsonld_modified_values(soup) -> list[str]:
+    values: list[str] = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text() or ""
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        for item in _walk_jsonld(data):
+            modified = item.get("dateModified")
+            if isinstance(modified, str) and modified.strip():
+                values.append(modified.strip())
+    return values
+
+
+def _meta_property(soup, property_name: str) -> str:
+    node = soup.find("meta", attrs={"property": re.compile(rf"^{re.escape(property_name)}$", re.I)})
+    if node is None:
+        node = soup.find("meta", attrs={"name": re.compile(rf"^{re.escape(property_name)}$", re.I)})
+    if node is None:
+        return ""
+    return str(node.get("content") or "").strip()
+
+
+def _extract_title(soup) -> str:
+    og_title = _meta_property(soup, "og:title")
+    if og_title:
+        return " ".join(og_title.split())[:240]
+    if soup.title:
+        text = " ".join(soup.title.get_text(" ", strip=True).split())
+        if text:
+            return text[:240]
+    return ""
+
+
+def _extract_modified_datetime(soup) -> Optional[datetime]:
+    candidates = list(_jsonld_modified_values(soup))
+    for prop in ("article:modified_time", "og:updated_time"):
+        value = _meta_property(soup, prop)
+        if value:
+            candidates.append(value)
+    for raw in candidates:
+        parsed = _parse_datetime(raw)
+        if parsed:
+            return parsed
+    return None
+
+
+def _robots_and_canonical(soup, url: str) -> dict[str, Any]:
+    robots = ""
+    node = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})
+    if node:
+        robots = str(node.get("content") or "").strip()
+    canonical = ""
+    link = soup.find("link", attrs={"rel": re.compile(r"canonical", re.I)})
+    if link:
+        canonical = str(link.get("href") or "").strip()
+    noindex = bool(re.search(r"noindex", robots, re.I))
+    path = urlparse(url).path or "/"
+    return {
+        "robots": robots or "index, follow (not declared)",
+        "canonical": canonical,
+        "indexed": not noindex,
+        "path": path,
+    }
+
+
+def _faq_audit(root) -> dict[str, Any]:
+    questions: list[dict[str, Any]] = []
+    if root is None:
+        return {"questions": [], "asked": 0, "answered": 0, "unanswered": 0}
+    for node in root.find_all(["h2", "h3"]):
+        text = " ".join(node.get_text(" ", strip=True).split())
+        if len(text) < 8:
+            continue
+        if not (text.endswith("?") or _QUESTION_START.match(text)):
+            continue
+        bits: list[str] = []
+        for sib in node.next_siblings:
+            name = getattr(sib, "name", None)
+            if name in {"h1", "h2", "h3", "h4"}:
+                break
+            if getattr(sib, "get_text", None):
+                bits.append(" ".join(sib.get_text(" ", strip=True).split()))
+        answer = " ".join(bit for bit in bits if bit).strip()
+        answered = len(answer) >= 40
+        questions.append({"question": text, "answered": answered})
+    answered_n = sum(1 for item in questions if item["answered"])
+    return {
+        "questions": questions[:16],
+        "asked": len(questions),
+        "answered": answered_n,
+        "unanswered": max(0, len(questions) - answered_n),
+    }
+
+
+def _first_number_word_index(text: str) -> Optional[int]:
+    words = (text or "").split()
+    for index, word in enumerate(words[:400], start=1):
+        if re.search(r"(\d|₹|rs\.?)", word, re.I):
+            return index
+    return None
+
+
+def _onpage_signals(soup, url: str, headers: dict[str, str]) -> dict[str, Any]:
+    """Live HTML facts used by the gap report. Extracted before scripts are stripped."""
+    meta = _robots_and_canonical(soup, url)
+    schema = _jsonld_types(soup)
+    author = ""
+    for selector in (
+        soup.find("meta", attrs={"name": re.compile(r"author", re.I)}),
+        soup.find(attrs={"itemprop": "author"}),
+        soup.find(class_=re.compile(r"\bauthor\b", re.I)),
+    ):
+        if selector is None:
+            continue
+        if selector.name == "meta":
+            author = str(selector.get("content") or "").strip()
+        else:
+            author = " ".join(selector.get_text(" ", strip=True).split())
+        if author:
+            break
+    images = []
+    for img in soup.find_all("img"):
+        alt = " ".join(str(img.get("alt") or "").split())
+        src = str(img.get("src") or img.get("data-src") or "")
+        if not src or src.startswith("data:"):
+            continue
+        images.append({"alt": alt, "generic": (not alt) or alt.lower() in {"hero", "image", "photo", "banner"}})
+    root = _content_root(soup)
+    cleaned = BeautifulSoup(str(root), "html.parser")
+    _strip_chrome(cleaned)
+    faq = _faq_audit(cleaned)
+    h3 = _heading_texts(cleaned, "h3")
+    h4 = _heading_texts(cleaned, "h4")
+    tables = len(cleaned.find_all("table")) if cleaned else 0
+    text = cleaned.get_text(" ", strip=True) if cleaned else ""
+    first_number_at = _first_number_word_index(text)
+    h2s = _heading_texts(cleaned, "h2")
+    consecutive_q = 0
+    best_run = 0
+    for heading in h2s:
+        if heading.endswith("?") or _QUESTION_START.match(heading):
+            consecutive_q += 1
+            best_run = max(best_run, consecutive_q)
+        else:
+            consecutive_q = 0
+    h4_without_h3 = bool(h4) and not h3
+    year_in_title = bool(re.search(r"\b20\d{2}\b", (soup.title.string if soup.title else "") or ""))
+    return {
+        "robots": meta["robots"],
+        "canonical": meta["canonical"],
+        "indexed": meta["indexed"],
+        "path": meta["path"],
+        "schema_types": schema,
+        "author": author[:120],
+        "image_count": len(images),
+        "generic_alts": sum(1 for item in images if item["generic"]),
+        "table_count": tables,
+        "h3_count": len(h3),
+        "h4_count": len(h4),
+        "h3_headings": h3[:20],
+        "faq": faq,
+        "first_number_at": first_number_at,
+        "consecutive_question_h2s": best_run,
+        "h4_without_h3": h4_without_h3,
+        "year_in_title": year_in_title,
+        "has_lastmod": bool(headers.get("last-modified") or soup.find("time") or soup.find("meta", attrs={"property": "article:modified_time"})),
+    }
+
+
+def _page_flags(page: dict[str, Any]) -> dict[str, bool]:
+    blob = f"{page.get('title', '')} {page.get('text', '')} {' '.join(page.get('h2_headings') or [])}".lower()
+    faq = page.get("faq") or {}
+    first_at = page.get("first_number_at")
+    return {
+        "headline_number": bool(first_at and first_at <= 80),
+        "faq_answered": int(faq.get("answered") or 0) > 0,
+        "cost_table": int(page.get("table_count") or 0) >= 1,
+        "attraction_fees": bool(re.search(r"\b(entry fee|ticket|sightseeing|garden|lake)\b", blob)),
+        "day3": bool(re.search(r"\b(3[\s-]?day|three day|3 nights)\b", blob)),
+        "origin_city": bool(re.search(
+            r"\b(from (bangalore|bengaluru|chennai|mumbai|hyderabad|delhi|coimbatore|kochi|pune))\b",
+            blob,
+        )),
+        "named_hotel": bool(re.search(r"\b(marriott|hyatt|taj|itc|hilton|oyo|treebo|resort)\b", blob)),
+        "seasonal": bool(re.search(r"\b(december|summer|off[\s-]?season|peak season|monsoon)\b", blob)),
+        "author": bool(page.get("author") or page.get("has_lastmod")),
+        "schema_faq": any("faq" in str(item).lower() for item in (page.get("schema_types") or [])),
+    }
+
+
 def _page_stats(url: str, html: str, headers: dict[str, str]) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
+    try:
+        signals = _onpage_signals(soup, url, headers)
+    except Exception as error:
+        logger.warning("on-page signals failed for %s: %s", url, error)
+        signals = {}
+    try:
+        title = _extract_title(soup)
+    except Exception as error:
+        logger.warning("title extract failed for %s: %s", url, error)
+        title = ""
+    try:
+        modified_dt = _extract_modified_datetime(soup)
+    except Exception as error:
+        logger.warning("date extract failed for %s: %s", url, error)
+        modified_dt = None
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    title = ""
-    if soup.title and soup.title.string:
-        title = soup.title.string.strip()
-
-    markdown, cleaned, md_words = _extract_readable_article(soup)
-    h1_headings = _heading_texts(cleaned, "h1")
-    h2_headings = _heading_texts(cleaned, "h2")
+    try:
+        markdown, cleaned, md_words = _extract_readable_article(soup)
+    except Exception as error:
+        logger.warning("content extract failed for %s: %s", url, error)
+        markdown, cleaned, md_words = "", None, 0
+    h1_headings = _heading_texts(cleaned, "h1") if cleaned else []
+    h2_headings = _heading_texts(cleaned, "h2") if cleaned else []
     h1 = h1_headings[0] if h1_headings else ""
     if not title:
-        title = h1 or url
+        title = h1
 
     logger.info(
         "Heading audit %s: %s H1 %s | %s H2 %s | extract_words=%s",
@@ -390,37 +759,39 @@ def _page_stats(url: str, html: str, headers: dict[str, str]) -> dict[str, Any]:
     )
 
     text = cleaned.get_text(" ", strip=True) if cleaned else ""
-    words = md_words or count_words(text)
+    words = count_words(text) or md_words
     article_html = markdown[:80000]
-
-    modified = headers.get("last-modified", "")
-    if not modified:
-        meta = soup.find("meta", attrs={"property": "article:modified_time"})
-        if meta:
-            modified = meta.get("content") or ""
-    if not modified:
-        time_el = soup.find("time")
-        if time_el:
-            modified = time_el.get("datetime") or time_el.get_text(" ", strip=True)
+    extract_ok = bool(title) and words >= 100
+    meta_description = _meta_property(soup, "og:description") or _meta_property(soup, "description")
+    hrefs = re.findall(r"https?://[^\s)\"']+", markdown)
+    own_host = _host(url)
+    internal_links = sum(1 for href in hrefs if _host(href) == own_host)
+    external_links = max(0, len(hrefs) - internal_links)
 
     return {
         "url": url,
-        "title": title[:240],
+        "title": title[:240] if title else "",
         "h1": h1[:240],
         "h1_count": len(h1_headings),
         "h2_count": len(h2_headings),
         "h1_headings": h1_headings,
         "h2_headings": h2_headings,
-        "word_count": words,
+        "word_count": words or None,
         "text": text[:20000],
         "article_html": article_html,
         "source_markdown": markdown[:45000],
-        "extract_ok": words >= 100,
-        "updated": _relative_updated(_parse_datetime(modified)),
+        "extract_ok": extract_ok,
+        "extract_error": None if extract_ok else "unavailable",
+        "updated": _relative_updated(modified_dt) if modified_dt else "Unknown",
+        "updated_at": modified_dt.isoformat() if modified_dt else None,
         "content_type": _content_type(title or h1, text),
         "authority": _authority(url),
         "favicon": _favicon(url),
         "domain": _host(url) or url,
+        "meta_description": (meta_description or "")[:300],
+        "internal_links": internal_links,
+        "external_links": external_links,
+        **signals,
     }
 
 
@@ -465,13 +836,65 @@ def _heuristic_scores(
         "seo": min(96, seo),
         "geo": min(94, geo),
         "aeo": min(94, aeo),
+        "aio": min(94, max(30, geo - 4)),
+        "sxo": min(94, max(30, aeo - 2)),
     }
 
 
-def _score_page(keyword: str, page: dict[str, Any]) -> dict[str, int]:
-    title = page.get("title") or keyword or "Untitled page"
+def _unavailable_score(reason: str) -> dict[str, Any]:
+    return {
+        "score": None,
+        "status": "unavailable",
+        "reason": reason,
+        "factors": [],
+        "notes": [],
+        "tips": [],
+        "confidence": "low",
+    }
+
+
+def _public_score_block(scores: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "seo": scores.get("seo"),
+        "geo": scores.get("geo"),
+        "aeo": scores.get("aeo"),
+        "aio": scores.get("aio"),
+        "sxo": scores.get("sxo"),
+        "overall": scores.get("overall"),
+        "confidence": scores.get("confidence"),
+        "status": scores.get("status"),
+        "reason": scores.get("reason"),
+    }
+
+
+def _score_page(keyword: str, page: dict[str, Any]) -> dict[str, Any]:
+    reason = "Article text could not be extracted."
+    empty_reports = {
+        "seo": _unavailable_score(reason),
+        "geo": _unavailable_score(reason),
+        "aeo": _unavailable_score(reason),
+        "aio": _unavailable_score(reason),
+        "sxo": _unavailable_score(reason),
+    }
+    empty = {
+        "seo": None, "geo": None, "aeo": None, "aio": None, "sxo": None,
+        "overall": None, "confidence": "unavailable", "status": "unavailable",
+        "reason": reason, "reports": empty_reports, "scores": empty_reports,
+    }
+    article = page_full_text(page)
+    if not page.get("extract_ok") or len(article.split()) < 40:
+        empty["reason"] = "Article text could not be extracted."
+        return empty
+    title = page.get("title") or keyword or ""
+    if not title:
+        return empty
     brief_title = title if len(title) >= 5 else f"{keyword} guide"
-    article = page.get("article_html") or page.get("text") or title
+    confidence = "high" if page.get("updated_at") else "medium"
+    signals = {
+        "schema_types": page.get("schema_types") or [],
+        "author": page.get("author") or "",
+        "faq": page.get("faq") or {},
+    }
     try:
         brief = ContentBrief(
             primary_keyword=(keyword or title)[:200] or "blog",
@@ -483,24 +906,284 @@ def _score_page(keyword: str, page: dict[str, Any]) -> dict[str, int]:
         seo_model = SEOAnalysis(
             primary_keyword=brief.primary_keyword,
             meta_title=title[:70],
-            meta_description=(page.get("text") or "")[:160],
+            meta_description=(page.get("meta_description") or article)[:160],
         )
-        report = score_article(article, brief, seo_model)
+        report = score_article(article, brief, seo_model, signals)
+        packed = {}
+        for key in ("seo", "geo", "aeo", "aio", "sxo"):
+            block = report.get(key) or {}
+            if isinstance(block.get("score"), int):
+                packed[key] = block
+            else:
+                packed[key] = _unavailable_score(f"{key.upper()} could not be calculated.")
         return {
-            "seo": int(report["seo"]["score"]),
-            "geo": int(report["geo"]["score"]),
-            "aeo": int(report["aeo"]["score"]),
+            "seo": packed["seo"].get("score"),
+            "geo": packed["geo"].get("score"),
+            "aeo": packed["aeo"].get("score"),
+            "aio": packed["aio"].get("score"),
+            "sxo": packed["sxo"].get("score"),
+            "overall": int(report.get("overall") or 0),
+            "confidence": confidence,
+            "status": "ok",
+            "reports": packed,
+            "scores": packed,
         }
     except Exception as error:
         logger.warning("score_article failed for %s: %s", page.get("url"), error)
-        return _heuristic_scores(
+        scores = _heuristic_scores(
             keyword,
             title,
-            page.get("text") or "",
+            article,
             int(page.get("word_count") or 0),
             int(page.get("h1_count") or 0),
             int(page.get("h2_count") or 0),
         )
+        scores["overall"] = round(sum(scores[k] for k in ("seo", "geo", "aeo", "aio", "sxo")) / 5)
+        scores["confidence"] = "low"
+        scores["status"] = "ok"
+        scores["reason"] = f"Checklist used a fallback scorer: {error}"
+        scores["reports"] = {
+            key: {"score": scores[key], "status": "ok", "reason": "Heuristic fallback", "factors": []}
+            for key in ("seo", "geo", "aeo", "aio", "sxo")
+        }
+        scores["scores"] = scores["reports"]
+        return scores
+
+
+def _keyword_tokens(keyword: str) -> list[str]:
+    skip = {
+        "the", "and", "for", "with", "from", "best", "your", "our", "how",
+        "complete", "guide", "blog", "news", "post", "create", "creating",
+        "collections", "collection", "ultimate", "ideas", "idea", "setting",
+    }
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", (keyword or "").lower())
+        if 2 < len(token) < 12 and token not in skip
+    ]
+    return tokens[:5]
+
+
+def _core_topic_terms(tokens: list[str]) -> set[str]:
+    money = {"cost", "budget", "price", "prices", "pricing", "fee", "fees", "fare", "cheap"}
+    product = {"tablecloth", "tablecloths", "linen", "linens", "bedding"}
+    extra: set[str] = set()
+    if any(token in money for token in tokens):
+        extra |= money
+    if any(token in product for token in tokens):
+        extra |= product
+    return extra
+
+
+def _serp_relevance(keyword: str, title: str, url: str, snippet: str) -> int:
+    tokens = _keyword_tokens(keyword)
+    title_l = (title or "").lower()
+    url_l = (url or "").lower()
+    snip_l = (snippet or "").lower()
+    blob = f"{title_l} {url_l} {snip_l}"
+    if not tokens:
+        return 1
+    host = urlparse(url).netloc.lower()
+    if any(host == item or host.endswith("." + item) for item in (
+        "wikipedia.org",
+        "britannica.com",
+        "wiktionary.org",
+        "merriam-webster.com",
+        "dictionary.cambridge.org",
+    )):
+        return -5
+    hits = 0
+    for token in tokens:
+        if token in title_l:
+            hits += 2
+        elif token in url_l:
+            hits += 2
+        elif token in snip_l:
+            hits += 1
+    core = _core_topic_terms(tokens)
+    if core and not any(term in blob for term in core):
+        return -2
+    path = urlparse(url).path.rstrip("/")
+    if not path and hits < 3:
+        hits -= 1
+    return hits
+
+
+TARGET_COMPETITORS = 5
+SERP_CANDIDATE_LIMIT = 10
+
+
+def _unique_token_hits(keyword: str, title: str, url: str, snippet: str) -> list[str]:
+    tokens = _keyword_tokens(keyword)
+    blob = f"{title} {url} {snippet}".lower()
+    return [token for token in tokens if token in blob]
+
+
+def _serp_item_score(keyword: str, item: Any) -> int:
+    return _serp_relevance(
+        keyword,
+        getattr(item, "title", "") or "",
+        getattr(item, "url", "") or "",
+        getattr(item, "snippet", "") or "",
+    )
+
+
+def _topic_threshold(keyword: str) -> int:
+    return max(2, min(3, len(_keyword_tokens(keyword)) or 1))
+
+
+def _leading_token_only_match(keyword: str, title: str, url: str, snippet: str) -> bool:
+    tokens = _keyword_tokens(keyword)
+    if len(tokens) < 3:
+        return False
+    hits = _unique_token_hits(keyword, title, url, snippet)
+    return hits == [tokens[0]]
+
+
+def _order_serp_results(keyword: str, results: list[Any]) -> list[Any]:
+    """Prefer on-topic pages, then fill with the next-best organic results."""
+    scored = [(_serp_item_score(keyword, item), item) for item in results]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    needed = _topic_threshold(keyword)
+    strong: list[Any] = []
+    rest: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for score, item in scored:
+        url = getattr(item, "url", "") or ""
+        title = getattr(item, "title", "") or ""
+        snippet = getattr(item, "snippet", "") or ""
+        key = _url_key(url)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        if score <= -3:
+            continue
+        if _leading_token_only_match(keyword, title, url, snippet):
+            continue
+        hits = _unique_token_hits(keyword, title, url, snippet)
+        if score >= needed or len(hits) >= needed:
+            strong.append(item)
+        elif hits:
+            rest.append(item)
+    return strong + rest
+
+
+def _competitor_serp_queries(keyword: str) -> list[str]:
+    phrase = " ".join((keyword or "").split())
+    tokens = re.findall(r"[A-Za-z0-9']+", phrase)
+    queries: list[str] = []
+    if len(tokens) >= 3:
+        queries.append(" ".join(tokens[-3:]))
+        queries.append('"' + " ".join(tokens[:3]) + '"')
+        queries.append(" ".join(tokens[2:]))
+        queries.append(" ".join(tokens[1:4]))
+    if phrase:
+        queries.append(phrase)
+        queries.append(f"{phrase} guide")
+        queries.append(f"{phrase} blog")
+    shorter = _shorten_query(phrase)
+    if shorter:
+        queries.append(shorter)
+    seen: set[str] = set()
+    out: list[str] = []
+    for query in queries:
+        key = query.lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(query.strip())
+    return out
+
+
+def _filter_relevant_results(keyword: str, results: list[Any]) -> list[Any]:
+    needed = _topic_threshold(keyword)
+    ordered = _order_serp_results(keyword, results)
+    return [
+        item for item in ordered
+        if _serp_item_score(keyword, item) >= needed
+    ][:8]
+
+
+def _page_topic_score(keyword: str, page: dict[str, Any], item: Any) -> int:
+    text = (page.get("text") or "")[:2500]
+    return _serp_relevance(
+        keyword,
+        page.get("title") or getattr(item, "title", "") or "",
+        getattr(item, "url", "") or page.get("url") or "",
+        f"{getattr(item, 'snippet', '') or ''} {text}",
+    )
+
+
+def _dedupe_serp(results: list[Any]) -> list[Any]:
+    seen: set[tuple[str, str]] = set()
+    out: list[Any] = []
+    for item in results:
+        url = getattr(item, "url", "") or ""
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().removeprefix("www.")
+        key = (host, parsed.path.rstrip("/").lower())
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _pick_serp_results(keyword: str, initial: list[Any]) -> list[Any]:
+    merged = _dedupe_serp(list(initial or []))
+    picked = _order_serp_results(keyword, merged)
+    needed = _topic_threshold(keyword)
+
+    def strong_count(items: list[Any]) -> int:
+        return sum(1 for item in items if _serp_item_score(keyword, item) >= needed)
+
+    if strong_count(picked) < TARGET_COMPETITORS:
+        extras = _competitor_serp_queries(keyword)
+        already = {keyword.strip().lower()}
+        for query in extras:
+            if query.lower() in already:
+                continue
+            already.add(query.lower())
+            try:
+                more = search_serp(query, max_results=10)
+            except Exception as error:
+                logger.warning("Topic SERP retry failed for '%s': %s", query, error)
+                more = []
+            if not more:
+                continue
+            merged = _dedupe_serp(merged + more)
+            picked = _order_serp_results(keyword, merged)
+            if strong_count(picked) >= TARGET_COMPETITORS:
+                break
+    return picked[:SERP_CANDIDATE_LIMIT]
+
+
+def _select_competitor_rows(
+    pending: list[dict[str, Any]],
+    *,
+    target: int = TARGET_COMPETITORS,
+    needed: int = 2,
+) -> list[dict[str, Any]]:
+    """Keep pasted URLs, then fill to `target` with the strongest SERP pages."""
+    manuals = [item["row"] for item in pending if item.get("is_manual")]
+    rest = [item for item in pending if not item.get("is_manual")]
+    rest.sort(
+        key=lambda item: (int(item.get("topic") or 0), 1 if item.get("extract_ok") else 0),
+        reverse=True,
+    )
+    strong = [item["row"] for item in rest if int(item.get("topic") or 0) >= needed]
+    weak = [item["row"] for item in rest if int(item.get("topic") or 0) < needed]
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in manuals + strong + weak:
+        key = _url_key(str(row.get("url") or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        selected.append(row)
+        if len(selected) >= target:
+            break
+    return selected
 
 
 def _opportunity_signals(page: dict[str, Any]) -> list[dict[str, str]]:
@@ -527,8 +1210,6 @@ def _opportunity_signals(page: dict[str, Any]) -> list[dict[str, str]]:
         add("warning", "Thin on supporting detail")
     if not re.search(r"\b(example|case study|template)\b", blob):
         add("warning", "Few practical examples")
-    if not signals:
-        add("positive", "Solid on-page structure")
     return signals
 
 
@@ -536,50 +1217,51 @@ def _scrape_url(url: str) -> Optional[dict[str, Any]]:
     try:
         html, headers = _fetch_html(url)
         return _page_stats(url, html, headers)
+    except requests.HTTPError as error:
+        status = getattr(error.response, "status_code", "?")
+        logger.warning("Could not scrape %s: HTTP %s", url, status)
+        return None
     except Exception as error:
         logger.warning("Could not scrape %s: %s", url, error)
         return None
 
 
 def _fallback_page(url: str, title: str, snippet: str) -> dict[str, Any]:
+    cleaned_title = " ".join((title or "").split())
+    if re.match(r"^https?://", cleaned_title, flags=re.I):
+        cleaned_title = ""
+    snippet_text = " ".join((snippet or "").split())
+    snippet_words = count_words(snippet_text)
     return {
         "url": url,
-        "title": title or url,
-        "h1": title or "",
-        "h1_count": 1 if title else 0,
+        "title": cleaned_title,
+        "h1": cleaned_title,
+        "h1_count": 1 if cleaned_title else 0,
         "h2_count": 0,
-        "h1_headings": [title] if title else [],
+        "h1_headings": [cleaned_title] if cleaned_title else [],
         "h2_headings": [],
-        "word_count": max(400, count_words(snippet) * 40),
-        "text": snippet,
-        "article_html": f"<h1>{title}</h1><p>{snippet}</p>",
+        "word_count": snippet_words or None,
+        "text": snippet_text,
+        "article_html": "",
         "source_markdown": "",
+        "snippet": snippet_text,
         "extract_ok": False,
-        "updated": "Updated recently",
-        "content_type": _content_type(title, snippet),
+        "extract_error": "unavailable",
+        "updated": "Unknown",
+        "updated_at": None,
+        "content_type": _content_type(cleaned_title, snippet_text) if cleaned_title or snippet_text else "Unknown",
         "authority": _authority(url),
         "favicon": _favicon(url),
         "domain": _host(url) or url,
     }
 
 
-def _writing_cue(intent: dict[str, Any]) -> str:
-    dominant = intent.get("heading") or "Readers are researching"
-    if "compar" in dominant.lower():
-        return "Lead with a comparison the searcher can scan, then name a clear recommendation."
-    if "learn" in dominant.lower() or "research" in dominant.lower():
-        return "Answer the core question in the first screen, then expand with steps and examples."
-    return "Make the destination obvious: who this is for, what they get, and the next step."
-
-
-def _intent_heading(weights: dict[str, int]) -> str:
-    ranked = sorted(weights.items(), key=lambda item: item[1], reverse=True)
-    top = ranked[0][0] if ranked else "informational"
-    if top == "commercial":
-        return "Readers are comparing"
-    if top == "navigational":
-        return "Readers are looking for a destination"
-    return "Readers are researching"
+_GENERIC_SECTIONS = {
+    "final thoughts", "conclusion", "introduction", "in conclusion",
+    "frequently asked questions", "faq", "faqs", "table of contents",
+    "related articles", "related posts", "key takeaways", "summary",
+    "leave a comment", "share this", "about the author",
+}
 
 
 def _clean_section_label(text: str) -> Optional[str]:
@@ -589,9 +1271,13 @@ def _clean_section_label(text: str) -> Optional[str]:
         return None
     if re.search(r"<[^>]+>", heading):
         return None
-    if re.match(r"^\d+[\.)]", heading):
+    if heading[-1] in ".!?":
+        return None
+    if re.match(r"^\d+[\.):]\s", heading):
         return None
     if "·" in heading or "|" in heading:
+        return None
+    if " - " in heading and len(heading.split()) >= 8:
         return None
     if re.search(
         r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b.*\d{4}",
@@ -600,6 +1286,8 @@ def _clean_section_label(text: str) -> Optional[str]:
     ):
         return None
     if heading.lower().startswith(("discover ", "shop ", "buy ", "subscribe")):
+        return None
+    if heading.lower().strip(" :") in _GENERIC_SECTIONS:
         return None
     if not _looks_complete(heading):
         return None
@@ -620,533 +1308,488 @@ def _looks_complete(text: str) -> bool:
     }
 
 
-def _finished_sentence(text: str) -> str:
-    text = " ".join((text or "").split())
-    if not text:
-        return ""
-    if text[-1] not in ".!?":
-        text = text.rstrip(" ,;:-") + "."
-    return text
-
-
-_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
-_QUESTION_START = re.compile(
-    r"^(how|what|why|is|does|can|when|where|who|which|should|are|do)\b",
-    re.IGNORECASE,
-)
-_ENTITY_SKIP = {
-    "table of contents", "key takeaways", "frequently asked",
-    "related articles", "privacy policy", "terms of service",
-    "cookie policy", "all rights reserved", "read more",
-}
-
-
-def _page_blob(your_page: Optional[dict[str, Any]]) -> str:
-    your_text = (your_page or {}).get("text", "").lower()
-    your_html = (your_page or {}).get("article_html", "").lower()
-    your_h2 = " ".join((your_page or {}).get("h2_headings") or []).lower()
-    return f"{your_text} {your_html} {your_h2}"
-
-
-def _phrase_covered(phrase: str, blob: str) -> bool:
-    tokens = [t for t in re.findall(r"[a-z0-9]+", phrase.lower()) if len(t) > 3]
-    if not tokens:
-        return True
-    return sum(1 for t in tokens if t in blob) >= max(1, len(tokens) // 2)
-
-
-def _dedupe_gaps(gaps: list[dict[str, str]], limit: int = 8) -> list[dict[str, str]]:
-    seen: set[str] = set()
-    unique: list[dict[str, str]] = []
-    for gap in gaps:
-        key = (gap.get("title") or "").lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(gap)
-        if len(unique) >= limit:
-            break
-    return unique
-
-
-def _sort_gaps(gaps: list[dict[str, str]]) -> list[dict[str, str]]:
-    return sorted(
-        gaps,
-        key=lambda gap: _SEVERITY_RANK.get(str(gap.get("severity") or "low"), 9),
-    )
-
-
-def _missing_competitor_topics(
-    your_page: Optional[dict[str, Any]],
-    competitors: list[dict[str, Any]],
-) -> list[str]:
-    blob = _page_blob(your_page)
-    missing: list[str] = []
-    seen: set[str] = set()
-    for competitor in competitors:
-        for heading in competitor.get("h2_headings") or []:
-            cleaned = _clean_section_label(heading)
-            if not cleaned:
-                continue
-            key = cleaned.lower()
-            if key in seen or _phrase_covered(cleaned, blob):
-                continue
-            seen.add(key)
-            missing.append(cleaned)
-    return missing
-
-
-def _build_entity_gaps(
-    your_page: Optional[dict[str, Any]],
-    competitors: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    """Named entities on ranking pages that do not appear on the user's page."""
-    blob = _page_blob(your_page)
-    counts: dict[str, int] = {}
-    for competitor in competitors:
-        text = " ".join([
-            str(competitor.get("title") or ""),
-            str(competitor.get("text") or "")[:4000],
-        ])
-        for match in re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text):
-            cleaned = " ".join(match.split())
-            if len(cleaned) < 6 or cleaned.lower() in _ENTITY_SKIP:
-                continue
-            if _phrase_covered(cleaned, blob):
-                continue
-            counts[cleaned] = counts.get(cleaned, 0) + 1
-    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    gaps: list[dict[str, str]] = []
-    for name, hits in ranked[:6]:
-        gaps.append({
-            "severity": "medium" if hits >= 2 else "low",
-            "title": f"Missing entity: {name}",
-            "description": _finished_sentence(
-                f'Ranking pages mention "{name}", and your page never names it'
-            ),
-        })
-    return gaps
-
-
-def _build_paa_opportunities(
-    related_queries: list[str],
-    your_page: Optional[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    blob = _page_blob(your_page)
-    items: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for query in related_queries:
-        phrase = " ".join(str(query or "").split())
-        if not phrase:
-            continue
-        if not (phrase.endswith("?") or _QUESTION_START.match(phrase)):
-            continue
-        key = phrase.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append({
-            "query": phrase,
-            "answered": _phrase_covered(phrase, blob),
-        })
-        if len(items) >= 12:
-            break
-    return items
-
-
-def _build_recommended_structure(
-    your_page: Optional[dict[str, Any]],
-    common_headings: list[str],
-    topical_gaps: list[dict[str, str]],
-    missing_topics: list[str],
-) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    def add(heading: str, status: str, source: str) -> None:
-        cleaned = _clean_section_label(heading) or " ".join((heading or "").split())
-        if not cleaned:
-            return
-        key = cleaned.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        items.append({"heading": cleaned, "status": status, "source": source})
-
-    for heading in (your_page or {}).get("h2_headings") or []:
-        add(heading, "keep", "your page")
-    for heading in common_headings:
-        add(heading, "add", "competitor H2s")
-    for heading in missing_topics:
-        add(heading, "add", "competitor H2s")
-    for gap in topical_gaps:
-        title = str(gap.get("title") or "")
-        implied = re.sub(r"^missing (?:section|core section):\s*", "", title, flags=re.I)
-        if implied and implied.lower() not in {"missing faq block", "no ecommerce workflow", "shorter than ranking pages"}:
-            add(implied, "add", "topical gap")
-    return items[:16]
-
-
-def _build_gaps(
-    keyword: str,
-    your_page: Optional[dict[str, Any]],
-    competitors: list[dict[str, Any]],
-    related_queries: list[str],
-    common_headings: list[str],
-) -> dict[str, Any]:
-    """
-    Split content gaps into keyword, topical, and entity lists.
-
-    Also returns a combined `gaps` list (all three, severity-sorted)
-    so existing readers of the flat field keep working.
-    """
-    blob = _page_blob(your_page)
-    missing_topics = _missing_competitor_topics(your_page, competitors)
-
-    keyword_gaps: list[dict[str, str]] = []
-    query_hits = [q for q in related_queries if q and not _phrase_covered(q, blob)]
-    for query in query_hits[:5]:
-        keyword_gaps.append({
-            "severity": "high" if not keyword_gaps else "medium",
-            "title": f'Uncovered query: {query}',
-            "description": _finished_sentence(
-                f'People also search for "{query}", '
-                "and your page does not answer that query yet"
-            ),
-        })
-
-    topical_gaps: list[dict[str, str]] = []
-    for topic in missing_topics[:5]:
-        topical_gaps.append({
-            "severity": "high",
-            "title": f"Missing section: {topic}",
-            "description": _finished_sentence(
-                f'Ranking pages cover "{topic}", and your post does not'
-            ),
-        })
-    seen_topics = {t.lower() for t in missing_topics}
-    for heading in common_headings:
-        cleaned = _clean_section_label(heading)
-        if cleaned and not _phrase_covered(cleaned, blob) and cleaned.lower() not in seen_topics:
-            topical_gaps.append({
-                "severity": "medium",
-                "title": f"Missing core section: {cleaned}",
-                "description": _finished_sentence(
-                    f'Several ranking pages treat "{cleaned}" as a core section, '
-                    "and your draft does not"
-                ),
-            })
-            break
-
-    comp_words = [int(c.get("word_count") or 0) for c in competitors]
-    avg_words = int(sum(comp_words) / len(comp_words)) if comp_words else 0
-    your_words = int((your_page or {}).get("word_count") or 0)
-    if your_page and avg_words and your_words < avg_words * 0.7:
-        topical_gaps.append({
-            "severity": "high",
-            "title": "Shorter than ranking pages",
-            "description": _finished_sentence(
-                f"Your page is about {your_words:,} words, "
-                f"while ranking competitors average {avg_words:,} words"
-            ),
-        })
-
-    ecommerce_comp = sum(
-        1 for c in competitors
-        if re.search(
-            r"\b(shopify|woocommerce|ecommerce|checkout|workflow)\b",
-            f"{c.get('title', '')} {c.get('text', '')[:1200]}".lower(),
-        )
-    )
-    if ecommerce_comp >= 2 and your_page and "ecommerce" not in blob and "shopify" not in blob:
-        topical_gaps.append({
-            "severity": "medium",
-            "title": "No ecommerce workflow",
-            "description": _finished_sentence(
-                "Ranking pages show how this applies in a store or checkout flow, "
-                "and your post never gets that specific"
-            ),
-        })
-
-    faq_comp = sum(
-        1 for c in competitors
-        if "faq" in f"{c.get('title', '')} {c.get('text', '')[:1500]}".lower()
-        or f"{c.get('text', '')}".count("?") >= 4
-    )
-    if faq_comp >= 2 and your_page and "faq" not in blob:
-        topical_gaps.append({
-            "severity": "low",
-            "title": "Missing FAQ block",
-            "description": _finished_sentence(
-                "Answer engines reward a short set of direct questions and answers, "
-                "and your page does not include an FAQ"
-            ),
-        })
-
-    if not your_page:
-        topical_gaps.append({
-            "severity": "medium",
-            "title": f"Own the {keyword} angle",
-            "description": _finished_sentence(
-                "Add a source URL next time to see which ranking sections you still miss"
-            ),
-        })
-
-    entity_gaps = _build_entity_gaps(your_page, competitors)
-    keyword_gaps = _dedupe_gaps(keyword_gaps)
-    topical_gaps = _dedupe_gaps(topical_gaps)
-    entity_gaps = _dedupe_gaps(entity_gaps)
-    combined = _sort_gaps(keyword_gaps + topical_gaps + entity_gaps)
-    if not combined:
-        topical_gaps = [{
-            "severity": "low",
-            "title": "Sharpen the unique angle",
-            "description": _finished_sentence(
-                "Ranking pages overlap, so call out the audience and outcome they skip"
-            ),
-        }]
-        combined = list(topical_gaps)
-    return {
-        "keyword_gaps": keyword_gaps,
-        "topical_gaps": topical_gaps,
-        "entity_gaps": entity_gaps,
-        "gaps": combined,
-        "missing_topics": missing_topics,
-    }
+def _competitor_does_well(page: dict[str, Any], flags: dict[str, bool]) -> str:
+    notes = []
+    if flags.get("faq_answered"):
+        notes.append("FAQ answers visible in HTML")
+    if flags.get("headline_number"):
+        notes.append("early extractable cost number")
+    if flags.get("cost_table"):
+        notes.append(f"{page.get('table_count') or 1} cost table(s)")
+    if flags.get("day3"):
+        notes.append("3-day cost coverage")
+    if flags.get("origin_city"):
+        notes.append("origin-city split")
+    if flags.get("seasonal"):
+        notes.append("seasonal price notes")
+    tables = int(page.get("table_count") or 0)
+    if tables and not any("table" in note.lower() for note in notes):
+        notes.append(f"{tables} comparison table(s)")
+    return "; ".join(notes[:4])
 
 
 def analyze_competitors(
     blog_url: Optional[str] = None,
     keyword: Optional[str] = None,
+    competitor_urls: Optional[list[str]] = None,
     on_progress: ProgressFn = None,
+    country: Optional[str] = None,
+    language: Optional[str] = None,
+    competitor_count: Optional[int] = None,
+    client_analysis_id: Optional[str] = None,
+    current_origin: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Live SERP competitor snapshot plus content-gap analysis.
-
-    Extra keys on the returned dict (plain dict, no Pydantic model):
-      keyword_gaps / topical_gaps / entity_gaps: severity/title/description
-      gaps: concatenation of those three, sorted by severity
-      paa_opportunities: {query, answered} from related question queries
-      recommended_structure: {heading, status keep|add, source}
+    Live SERP competitor snapshot for ranking pages.
     """
-    blog_url = (blog_url or "").strip() or None
-    keyword = (keyword or "").strip() or None
-    if not blog_url and not keyword:
-        raise ValueError("Enter a blog URL or a target keyword.")
+    analysis_id = str(uuid.uuid4())
+    submitted_keyword = (keyword or "").strip() or None
+    url_check = validate_blog_url(blog_url, current_origin or "")
+    if url_check["status"] == "invalid":
+        raise ValueError(url_check["error"] or "Please enter a valid public article URL.")
+    blog_url = url_check["url"] if url_check["ok"] else None
+    keyword = submitted_keyword
+    keyword_source = "user" if keyword else "missing"
+    detected_keyword = ""
+    detected_evidence: list[str] = []
+    blog_url_status = url_check["status"]
+    mode = analysis_mode(blog_url, keyword)
+    manual_urls = _normalize_competitor_urls(competitor_urls)
+    country = re.sub(r"[^a-z]", "", (country or "us").lower())[:8] or "us"
+    language = re.sub(r"[^a-z-]", "", (language or "en").lower())[:8] or "en"
+    target_n = max(3, min(10, int(competitor_count or TARGET_COMPETITORS)))
+    if not blog_url and not keyword and not manual_urls:
+        raise ValueError("Enter a blog URL, a target keyword, or competitor URLs.")
 
     your_page: Optional[dict[str, Any]] = None
+    scraped_by_url: dict[str, dict[str, Any]] = {}
     if blog_url:
         _emit(on_progress, "fetch_page", "Fetching your page")
         your_page = _scrape_url(blog_url)
         if your_page is None:
-            raise ValueError(
-                "Could not fetch that blog URL. Check the link or enter a keyword manually."
-            )
+            raise ValueError("The page could not be fetched.")
+        your_page["full_text"] = page_full_text(your_page)
+        blog_url_status = "extracted" if your_page.get("extract_ok") else "extract_failed"
+        if not your_page.get("url"):
+            your_page["url"] = blog_url
         if not keyword:
-            keyword = _detect_keyword(
-                your_page.get("title") or "",
-                your_page.get("h1") or "",
-                blog_url,
-            )
+            detected = detect_keyword_from_article(your_page)
+            keyword = detected["keyword"]
+            detected_keyword = keyword
+            detected_evidence = detected["evidence"]
+            keyword_source = "auto_detected"
+            mode = "blog_auto_detected"
+
+    if not keyword and manual_urls:
+        seed = _scrape_url(manual_urls[0])
+        if seed:
+            scraped_by_url[manual_urls[0]] = seed
+            scraped_by_url[seed["url"]] = seed
+            detected = detect_keyword_from_article(seed)
+            keyword = detected["keyword"]
+            detected_keyword = keyword
+            detected_evidence = detected["evidence"]
+            keyword_source = "auto_detected"
 
     if not keyword:
         raise ValueError("Could not detect a keyword. Enter one manually.")
 
+    serp_query = keyword
+    serp_query_source = "user" if keyword_source == "user" else "auto_detected"
+    logger.info(
+        "Competitor SERP query=%r source=%s analysis_id=%s blog_url=%s",
+        serp_query,
+        serp_query_source,
+        analysis_id,
+        blog_url,
+    )
+
     _emit(on_progress, "serp", "Running SERP")
-    serp = analyze_serp(keyword, max_results=8)
+    serp = analyze_serp(serp_query, max_results=max(15, target_n + 5), country=country, language=language)
     if not serp.results:
-        raise ValueError("No search results found for that keyword. Try a more specific phrase.")
+        shorter = _shorten_query(serp_query)
+        if shorter != serp_query:
+            logger.info(
+                "Retrying SERP with shortened keyword %r; keeping serp_query=%r",
+                shorter,
+                serp_query,
+            )
+            extra = analyze_serp(shorter, max_results=max(15, target_n + 5), country=country, language=language)
+            if extra.results:
+                serp.results = extra.results
+    raw_serp_count = len(serp.results or [])
+    if serp.results:
+        picked = _pick_serp_results(serp_query, serp.results)
+        serp.results = picked or _order_serp_results(serp_query, serp.results)[:SERP_CANDIDATE_LIMIT]
+        serp.common_headings = extract_headings_from_snippets(serp.results)
+        serp.nlp_keywords = extract_nlp_keywords(serp_query, serp.results)
+    serp.keyword = serp_query
+    serp_warning = ""
+    if not serp.results:
+        if manual_urls:
+            logger.info("SERP empty or off-topic for '%s'; using %s manual URLs", keyword, len(manual_urls))
+        elif raw_serp_count:
+            serp_warning = (
+                "Live search did not return ranking pages that match this blog topic. "
+                "Paste competitor URLs, or try a tighter keyword."
+            )
+            logger.warning("SERP off-topic for '%s'; continuing with ranking pages", keyword)
+        elif not your_page:
+            raise ValueError(
+                "No search results found for that keyword. "
+                "Try a shorter phrase, paste the blog URL, or add competitor URLs."
+            )
+        else:
+            serp_warning = (
+                "Live search timed out, so ranking competitors could not be loaded. "
+                "Paste competitor URLs, or the page audit below still uses your URL."
+            )
+            logger.warning("SERP empty for '%s'; continuing with live-page audit", keyword)
 
     _emit(on_progress, "competitors", "Analyzing competitors")
-    ranked = []
+    ranked: list[Any] = []
+    ranked_keys: set[tuple[str, str]] = set()
+    manual_keys: set[tuple[str, str]] = set()
+    own_key = _url_key(blog_url) if blog_url else ("", "")
+    for url in manual_urls:
+        key = _url_key(url)
+        if not key[0] or key in ranked_keys or key == own_key:
+            continue
+        ranked.append(SERPResult(title="", url=url, snippet=""))
+        ranked_keys.add(key)
+        manual_keys.add(key)
     for result in serp.results:
         if blog_url and _same_site(blog_url, result.url):
             continue
+        key = _url_key(result.url)
+        if not key[0] or key in ranked_keys:
+            continue
         ranked.append(result)
-        if len(ranked) >= 5:
+        ranked_keys.add(key)
+        if len(ranked) >= SERP_CANDIDATE_LIMIT:
             break
     if not ranked:
-        ranked = serp.results[:5]
+        ranked = list(serp.results[:SERP_CANDIDATE_LIMIT])
 
-    scraped_by_url: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_scrape_url, item.url): item.url for item in ranked}
+        futures = {
+            pool.submit(_scrape_url, item.url): item.url
+            for item in ranked
+            if item.url not in scraped_by_url
+        }
         for future in as_completed(futures):
+            original = futures[future]
             page = future.result()
             if page:
+                scraped_by_url[original] = page
                 scraped_by_url[page["url"]] = page
 
     _emit(on_progress, "scoring", "Scoring")
-    competitors: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    needed = _topic_threshold(keyword)
+    user_intent = article_intent(keyword, your_page)
     for item in ranked:
-        page = scraped_by_url.get(item.url) or _fallback_page(
-            item.url, item.title, item.snippet
-        )
+        page = scraped_by_url.get(item.url)
+        if page is None:
+            logger.warning("Scrape unavailable for %s; not inventing title, words, date, or scores", item.url)
+            page = _fallback_page(item.url, item.title, item.snippet)
+        page = {**page, "full_text": page_full_text(page)}
+        is_manual = _url_key(item.url) in manual_keys
+        topic = _page_topic_score(keyword, page, item)
         scores = _score_page(keyword, page)
-        competitors.append({
-            "url": item.url,
-            "domain": page["domain"],
-            "favicon": page["favicon"],
-            "title": page["title"] or item.title,
-            "content_type": page["content_type"],
-            "authority": page["authority"],
-            "word_count": page["word_count"],
-            "updated": page["updated"],
-            "h1_count": page["h1_count"],
-            "h2_count": page["h2_count"],
-            "h1_headings": page.get("h1_headings") or [],
-            "h2_headings": page.get("h2_headings") or [],
-            "scores": scores,
-            "signals": _opportunity_signals(page),
+        page_title = page.get("title") or item.title or ""
+        if re.match(r"^https?://", str(page_title), flags=re.I):
+            page_title = ""
+        page_view = {
+            **page,
             "snippet": item.snippet,
-            "text": page.get("text") or item.snippet,
-        })
-
-    your_scores = {"seo": 0, "geo": 0, "aeo": 0}
-    if your_page:
-        your_scores = _score_page(keyword, your_page)
-
-    your_intent_source = ""
-    if your_page:
-        your_intent_source = f"{your_page.get('title', '')} {your_page.get('text', '')[:3000]}"
-    else:
-        your_intent_source = keyword
-    competitor_intent_source = " ".join(
-        f"{c.get('title', '')} {c.get('snippet', '')}" for c in competitors
-    )
-    your_intent = _normalize_intents(_intent_weights(your_intent_source or keyword))
-    competitor_intent = _normalize_intents(_intent_weights(competitor_intent_source or keyword))
-    heading = _intent_heading(your_intent if your_page else competitor_intent)
-
-    best = {"seo": 0, "geo": 0, "aeo": 0, "h1_count": 0, "h2_count": 0, "word_count": 0}
-    best_keyword = "—"
-    if competitors:
-        best_seo = max(competitors, key=lambda c: c["scores"]["seo"])
-        best_geo = max(competitors, key=lambda c: c["scores"]["geo"])
-        best_aeo = max(competitors, key=lambda c: c["scores"]["aeo"])
-        best_h1 = max(competitors, key=lambda c: int(c.get("h1_count") or 0))
-        best_h2 = max(competitors, key=lambda c: int(c.get("h2_count") or 0))
-        best_words = max(competitors, key=lambda c: int(c.get("word_count") or 0))
-        best = {
-            "seo": best_seo["scores"]["seo"],
-            "geo": best_geo["scores"]["geo"],
-            "aeo": best_aeo["scores"]["aeo"],
-            "h1_count": best_h1.get("h1_count") or 0,
-            "h2_count": best_h2.get("h2_count") or 0,
-            "word_count": best_words.get("word_count") or 0,
+            "title": page_title,
         }
-        for comp in competitors:
-            if keyword.lower() in (comp.get("title") or "").lower():
-                best_keyword = keyword
-                break
-        if best_keyword == "—":
-            best_keyword = keyword
+        does_well = _competitor_does_well(page_view, _page_flags(page_view)) if page.get("extract_ok") else ""
+        well_signals = [
+            {"kind": "positive", "label": part.strip()}
+            for part in does_well.split(";")
+            if part.strip() and not re.match(r"^https?://", part.strip(), flags=re.I)
+        ][:4]
+        if page.get("extract_ok") and not well_signals:
+            well_signals = _opportunity_signals(page_view)
+        page_intent = classify_page_intent({**page_view, "url": item.url})
+        intent_mismatch = user_intent == "informational" and page_intent in {"transactional", "navigational"}
+        if intent_mismatch:
+            does_well = ""
+            well_signals = [{"kind": "warn", "label": "Intent mismatch"}]
+        pending.append({
+            "is_manual": is_manual,
+            "topic": topic,
+            "extract_ok": bool(page.get("extract_ok")),
+            "row": {
+                "url": item.url,
+                "domain": page["domain"],
+                "favicon": page["favicon"],
+                "title": page_title,
+                "page_title": page_title,
+                "page_title_signal": True,
+                "search_intent": page_intent,
+                "intent_mismatch": intent_mismatch,
+                "content_type": page["content_type"],
+                "authority": page["authority"],
+                "word_count": page.get("word_count"),
+                "updated": page.get("updated") or "Unknown",
+                "extract_ok": bool(page.get("extract_ok")),
+                "h1_count": page["h1_count"],
+                "h2_count": page["h2_count"],
+                "h1_headings": page.get("h1_headings") or [],
+                "h2_headings": page.get("h2_headings") or [],
+                "scores": scores,
+                "signals": well_signals,
+                "does_well": does_well,
+                "snippet": item.snippet,
+                "text": page.get("full_text") or page.get("text") or item.snippet,
+                "faq": page.get("faq") or {},
+                "table_count": page.get("table_count") or 0,
+                "schema_types": page.get("schema_types") or [],
+                "author": page.get("author") or "",
+                "has_lastmod": page.get("has_lastmod") or False,
+                "first_number_at": page.get("first_number_at"),
+                "image_count": page.get("image_count") or 0,
+                "generic_alts": page.get("generic_alts") or 0,
+                "meta_description": page.get("meta_description") or "",
+                "internal_links": page.get("internal_links") or 0,
+                "external_links": page.get("external_links") or 0,
+                "robots": page.get("robots") or "",
+                "canonical": page.get("canonical") or "",
+                "updated_at": page.get("updated_at"),
+            },
+        })
+    competitors = _select_competitor_rows(pending, target=target_n, needed=needed)
+    for index, row in enumerate(competitors, start=1):
+        row["rank"] = index
 
-    your_keyword = "—"
-    if your_page and keyword.lower() in f"{your_page.get('title', '')} {your_page.get('h1', '')}".lower():
-        your_keyword = keyword
-    elif your_page:
-        your_keyword = "Not in H1"
+    if ranked and not competitors and not serp_warning:
+        serp_warning = (
+            "Live search did not return ranking pages that match this blog topic. "
+            "Paste competitor URLs, or try a tighter keyword."
+        )
+    elif (
+        not manual_urls
+        and 0 < len(competitors) < target_n
+        and not serp_warning
+    ):
+        serp_warning = (
+            f"Live search found {len(competitors)} ranking page(s). "
+            "Add competitor URLs if you want a fuller set."
+        )
 
-    comparison = {
-        "your_blog": {
-            "seo": your_scores["seo"] if your_page else None,
-            "geo": your_scores["geo"] if your_page else None,
-            "aeo": your_scores["aeo"] if your_page else None,
-            "primary_keyword": your_keyword if your_page else None,
-            "h1_count": (your_page or {}).get("h1_count"),
-            "h2_count": (your_page or {}).get("h2_count"),
-            "word_count": (your_page or {}).get("word_count"),
-        },
-        "best_competitor": {
-            "seo": best["seo"],
-            "geo": best["geo"],
-            "aeo": best["aeo"],
-            "primary_keyword": best_keyword,
-            "h1_count": best["h1_count"],
-            "h2_count": best["h2_count"],
-            "word_count": best["word_count"],
-        },
-    }
-
-    gap_bundle = _build_gaps(
-        keyword,
-        your_page,
-        competitors,
-        list(serp.related_queries or []),
-        list(serp.common_headings or []),
-    )
-    paa_opportunities = _build_paa_opportunities(
-        list(serp.related_queries or []),
-        your_page,
-    )
-    recommended_structure = _build_recommended_structure(
-        your_page,
-        list(serp.common_headings or []),
-        gap_bundle["topical_gaps"],
-        gap_bundle.get("missing_topics") or [],
-    )
+    if your_page:
+        blob = page_full_text(your_page)
+        your_page = {
+            **your_page,
+            "full_text": blob,
+            "text": blob or your_page.get("text") or "",
+            "url": your_page.get("url") or blog_url,
+        }
+        missing_blog_reason = None
+        if not your_page.get("extract_ok") or len(page_full_text(your_page).split()) < 40:
+            missing_blog_reason = "Article text could not be extracted."
+        your_scores = _score_page(keyword, your_page)
+    elif mode == "keyword_only":
+        missing_blog_reason = "No blog URL submitted."
+        your_scores = {
+            "seo": None, "geo": None, "aeo": None, "aio": None, "sxo": None,
+            "overall": None, "confidence": "unavailable", "status": "unavailable",
+            "reason": missing_blog_reason, "reports": {}, "scores": {},
+        }
+    else:
+        missing_blog_reason = "The page could not be fetched."
+        your_scores = {
+            "seo": None, "geo": None, "aeo": None, "aio": None, "sxo": None,
+            "overall": None, "confidence": "unavailable", "status": "unavailable",
+            "reason": missing_blog_reason, "reports": {}, "scores": {},
+        }
 
     source_article = ""
     source_title = ""
     source_extract_error = False
+    full_text = page_full_text(your_page) if your_page else ""
     if your_page:
-        markdown = (your_page.get("source_markdown") or your_page.get("article_html") or "").strip()
-        extract_ok = bool(your_page.get("extract_ok")) and count_words(markdown) >= 100
-        if extract_ok and not re.search(r"<(?:html|head|nav|svg|script)\b", markdown, flags=re.I):
-            source_article = markdown[:45000]
+        extract_ok = bool(your_page.get("extract_ok")) and count_words(full_text) >= 40
+        if extract_ok:
+            source_article = full_text[:45000]
         else:
             source_extract_error = True
             source_article = ""
+            blog_url_status = "extract_failed"
         source_title = your_page.get("h1") or your_page.get("title") or ""
+
+    _emit(on_progress, "report", "Building report")
+    keyword_report = compare_keywords(keyword, your_page, competitors)
+    keyword_report["status"] = "ok" if keyword_report.get("table") else "unavailable"
+    if not keyword_report.get("table"):
+        keyword_report["reason"] = missing_blog_reason or "No overlapping phrases were extracted from the available headings."
+    gap_report = content_gaps(your_page, competitors, keyword)
+    gap_report["status"] = "ok"
+    if not gap_report.get("recommended_outline"):
+        gap_report["recommended_outline"] = [
+            "Introduction",
+            f"What is {keyword}?" if keyword else "What this guide covers",
+            "How to get started",
+            "Examples and comparisons",
+            "FAQ",
+        ]
+    citations = citation_opportunities(keyword, your_page, competitors)
+    citations["status"] = "ok"
+    readability = analyze_readability(full_text, language)
+    human = humanization_report(full_text)
+    original = originality_report({**(your_page or {}), "text": full_text}, competitors)
+
+    avg_scores = average_competitor_scores(competitors)
+    diffs = {}
+    for key in ("seo", "geo", "aeo", "aio", "sxo", "overall"):
+        yours_val = your_scores.get(key)
+        avg = avg_scores.get(key)
+        if isinstance(yours_val, (int, float)) and isinstance(avg, (int, float)):
+            diffs[key] = round(float(yours_val) - float(avg), 1)
+        else:
+            diffs[key] = None
+    traffic = traffic_reasons(your_page, competitors, your_scores, avg_scores)
+    plan = action_plan(your_page, your_scores, keyword_report, gap_report, readability)
+    if not plan:
+        plan_payload = {"items": [], "status": "unavailable", "reason": missing_blog_reason or "No prioritized actions were generated."}
+    else:
+        plan_payload = {"items": plan, "status": "ok", "reason": None}
 
     analyzed_at = datetime.now(timezone.utc).isoformat()
     slim_competitors = []
     for row in competitors:
         slim_competitors.append({
+            "rank": row.get("rank"),
             "url": row.get("url"),
             "domain": row.get("domain"),
-            "title": row.get("title"),
+            "favicon": row.get("favicon"),
+            "title": row.get("title") or UNAVAILABLE,
+            "page_title": row.get("page_title") or row.get("title") or UNAVAILABLE,
+            "page_title_signal": True,
+            "search_intent": row.get("search_intent") or "informational",
+            "intent_mismatch": bool(row.get("intent_mismatch")),
+            "meta_description": row.get("meta_description") or UNAVAILABLE,
             "content_type": row.get("content_type"),
             "authority": row.get("authority"),
             "word_count": row.get("word_count"),
-            "scores": row.get("scores") or {},
+            "updated": row.get("updated") or UNAVAILABLE,
+            "updated_at": row.get("updated_at"),
+            "extract_ok": bool(row.get("extract_ok")),
+            "scores": _public_score_block(row.get("scores") or {}),
             "h1_count": row.get("h1_count"),
             "h2_count": row.get("h2_count"),
+            "h1_headings": (row.get("h1_headings") or [])[:12],
+            "h2_headings": (row.get("h2_headings") or [])[:16],
+            "signals": row.get("signals") or [],
+            "does_well": row.get("does_well") or "",
+            "schema_types": row.get("schema_types") or [],
+            "author": row.get("author") or UNAVAILABLE,
+            "image_count": row.get("image_count") or 0,
+            "generic_alts": row.get("generic_alts") or 0,
+            "internal_links": row.get("internal_links") or 0,
+            "external_links": row.get("external_links") or 0,
+            "faq": row.get("faq") or {},
+            "canonical": row.get("canonical") or UNAVAILABLE,
+            "robots": row.get("robots") or UNAVAILABLE,
+            "table_count": row.get("table_count") or 0,
+            "domain_authority": UNAVAILABLE,
+            "backlinks": UNAVAILABLE,
+            "core_web_vitals": UNAVAILABLE,
         })
+    serp_insights = []
+    if user_intent == "informational" and any(row.get("intent_mismatch") for row in slim_competitors):
+        serp_insights.append("This query contains mixed intent; shopping pages also appear.")
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()][:40]
+    your_page_out = None
+    if your_page:
+        your_page_out = {
+            "url": your_page.get("url") or blog_url or "",
+            "title": source_title or your_page.get("title") or UNAVAILABLE,
+            "meta_description": your_page.get("meta_description") or UNAVAILABLE,
+            "h1": your_page.get("h1") or "",
+            "h2": (your_page.get("h2_headings") or [])[:24],
+            "h1_count": your_page.get("h1_count") or 0,
+            "h2_count": your_page.get("h2_count") or 0,
+            "h1_headings": your_page.get("h1_headings") or [],
+            "h2_headings": your_page.get("h2_headings") or [],
+            "full_text": full_text[:4000],
+            "paragraphs": paragraphs,
+            "word_count": your_page.get("word_count"),
+            "language": language,
+            "author": your_page.get("author") or None,
+            "published_date": None,
+            "updated_date": your_page.get("updated_at") or your_page.get("updated"),
+            "internal_links": your_page.get("internal_links") if isinstance(your_page.get("internal_links"), list) else [],
+            "external_links": your_page.get("external_links") if isinstance(your_page.get("external_links"), list) else [],
+            "internal_link_count": your_page.get("internal_links") if isinstance(your_page.get("internal_links"), int) else 0,
+            "external_link_count": your_page.get("external_links") if isinstance(your_page.get("external_links"), int) else 0,
+            "images": [],
+            "primary_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "primary"][:8],
+            "secondary_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "secondary"][:12],
+            "long_tail_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "long-tail"][:12],
+            "entities": [],
+            "schema_types": your_page.get("schema_types") or [],
+            "extract_ok": bool(your_page.get("extract_ok")),
+            "canonical": your_page.get("canonical") or UNAVAILABLE,
+            "faq": your_page.get("faq") or {},
+            "image_count": your_page.get("image_count") or 0,
+        }
     return {
+        "analysis_id": analysis_id,
+        "client_analysis_id": client_analysis_id,
+        "analysis_mode": mode,
+        "blog_url_status": blog_url_status,
+        "target_keyword_source": keyword_source,
+        "serp_query": serp_query,
+        "serp_query_source": serp_query_source,
+        "detected_keyword": detected_keyword,
+        "detected_keyword_evidence": detected_evidence,
         "blog_url": blog_url or "",
-        "target_keyword": keyword,
+        "target_keyword": serp_query,
+        "country": country,
+        "language": language,
+        "competitor_count": target_n,
+        "competitor_urls": manual_urls,
         "analyzed_at": analyzed_at,
-        "your_page": {
-            "title": source_title,
-            "word_count": (your_page or {}).get("word_count") or 0,
-            "h1_count": (your_page or {}).get("h1_count") or 0,
-            "h2_count": (your_page or {}).get("h2_count") or 0,
-            "h1_headings": (your_page or {}).get("h1_headings") or [],
-            "h2_headings": (your_page or {}).get("h2_headings") or [],
-        } if your_page else None,
+        "your_page": your_page_out,
         "source_article": source_article,
         "source_title": source_title,
         "source_extract_error": source_extract_error,
-        "old_scores": your_scores if your_page else {"seo": 0, "geo": 0, "aeo": 0},
+        "old_scores": your_scores,
+        "your_scores": your_scores,
+        "scores": your_scores.get("scores") or your_scores.get("reports") or {},
+        "competitor_avg_scores": avg_scores,
+        "score_diffs": diffs,
         "competitors": slim_competitors,
-        "intent": {
-            "heading": heading,
-            "your": your_intent,
-            "competitor_avg": competitor_intent,
-            "cue": _writing_cue({"heading": heading}),
-        },
-        "comparison": comparison,
-        "gaps": gap_bundle["gaps"],
-        "keyword_gaps": gap_bundle["keyword_gaps"],
-        "topical_gaps": gap_bundle["topical_gaps"],
-        "entity_gaps": gap_bundle["entity_gaps"],
-        "paa_opportunities": paa_opportunities,
-        "recommended_structure": recommended_structure,
+        "keywords": keyword_report,
+        "keyword_gaps": keyword_report,
+        "content_gaps": gap_report,
+        "citations": citations,
+        "traffic": traffic,
+        "readability": readability,
+        "humanization": human,
+        "originality": original,
+        "action_plan": plan,
+        "action_plan_report": plan_payload,
+        "serp_warning": serp_warning,
+        "serp_insights": serp_insights,
+        "article_intent": user_intent,
         "serp": {
-            "keyword": serp.keyword,
+            "keyword": serp_query,
             "related_queries": serp.related_queries[:8],
             "common_headings": serp.common_headings[:8],
+            "nlp_keywords": (serp.nlp_keywords or [])[:12],
         },
+        "unavailable_metrics": [
+            "search volume",
+            "keyword difficulty",
+            "domain authority",
+            "backlinks",
+            "referring domains",
+            "Core Web Vitals",
+            "verified traffic",
+        ],
     }
