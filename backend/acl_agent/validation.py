@@ -7,6 +7,7 @@ humanization quality heuristics.
 """
 from __future__ import annotations
 
+import html
 import re
 from collections import Counter
 from typing import Any, Optional
@@ -33,16 +34,75 @@ def word_count_band(target_word_count: int) -> tuple[int, int]:
     spread = int(round(target_word_count * WORD_COUNT_TOLERANCE))
     return target_word_count - spread, target_word_count + spread
 
+_MARKDOWN_H1 = re.compile(r"^#\s+.+$", flags=re.MULTILINE)
+_HTML_H1_OPEN = re.compile(r"<h1\b[^>]*>", flags=re.IGNORECASE)
+_HTML_H1_BLOCK = re.compile(
+    r"<h1\b[^>]*>.*?</h1>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
 def count_h1(text: str) -> int:
-    markdown = len(
-        re.findall(
-            r"^#\s+.+$",
+    markdown = len(_MARKDOWN_H1.findall(text))
+    html_count = len(_HTML_H1_OPEN.findall(text))
+    return markdown + html_count
+
+
+def normalize_single_h1(article: str, title: str = "") -> str:
+    """
+    Force the article body to contain exactly one H1.
+
+    Models often put the title only in the JSON `h1` field, or they
+    mark every section with `#` (counted as H1). Either case used to
+    fail generation after four retries. Fix the structure here instead
+    of asking the model to rewrite the whole article.
+    """
+    text = article or ""
+    heading = (title or "").strip()
+
+    markdown_h1s = list(_MARKDOWN_H1.finditer(text))
+    html_h1s = list(_HTML_H1_BLOCK.finditer(text))
+    if not html_h1s:
+        html_h1s = list(_HTML_H1_OPEN.finditer(text))
+
+    if html_h1s:
+        # Prefer the HTML title. Demote leftover markdown `#` headings
+        # and extra <h1> tags so they become H2s.
+        text = _MARKDOWN_H1.sub(
+            lambda match: "#" + match.group(0),
             text,
-            flags=re.MULTILINE,
         )
-    )
-    html = len(re.findall(r"<h1\b[^>]*>", text, flags=re.IGNORECASE))
-    return markdown + html
+        seen = [0]
+
+        def _keep_first_html(match: re.Match[str]) -> str:
+            seen[0] += 1
+            if seen[0] == 1:
+                return match.group(0)
+            return re.sub(
+                r"h1",
+                "h2",
+                match.group(0),
+                flags=re.IGNORECASE,
+            )
+
+        if _HTML_H1_BLOCK.search(text):
+            text = _HTML_H1_BLOCK.sub(_keep_first_html, text)
+        else:
+            text = _HTML_H1_OPEN.sub(_keep_first_html, text)
+    elif len(markdown_h1s) > 1:
+        seen = [0]
+
+        def _keep_first_markdown(match: re.Match[str]) -> str:
+            seen[0] += 1
+            if seen[0] == 1:
+                return match.group(0)
+            return "#" + match.group(0)
+
+        text = _MARKDOWN_H1.sub(_keep_first_markdown, text)
+    elif not markdown_h1s and heading:
+        text = f"<h1>{html.escape(heading)}</h1>\n\n{text}"
+
+    return text
 
 
 def word_count(text: str) -> int:

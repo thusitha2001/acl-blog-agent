@@ -24,6 +24,7 @@ from acl_agent.validation import (
     check_originality,
     count_h1,
     keyword_count,
+    normalize_single_h1,
     word_count,
     word_count_band,
 )
@@ -309,6 +310,10 @@ schema. Do not include notes about writing style, SEO, or process.
     )
 
     def extra_validate(parsed: SingleCallArticle) -> Optional[str]:
+        parsed.article_markdown = normalize_single_h1(
+            parsed.article_markdown,
+            parsed.h1,
+        )
         count = word_count(parsed.article_markdown)
         article = parsed.article_markdown
         issues: list[str] = []
@@ -316,7 +321,7 @@ schema. Do not include notes about writing style, SEO, or process.
         if count_h1(article) != 1:
             return (
                 "the article must contain exactly one H1 heading "
-                "(use a single <h1> title)"
+                "(use a single <h1> title, or a single Markdown # title)"
             )
 
         # Word count — min_words/max_words were computed and put in
