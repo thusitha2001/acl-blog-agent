@@ -1,11 +1,17 @@
 """Keyword extraction and gap analysis from live page text."""
 from __future__ import annotations
 
+import logging
+import os
 import re
+import unicodedata
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Optional
 
-from acl_agent.metrics import UNAVAILABLE
+from acl_agent.metrics import DEFAULT_METRICS, UNAVAILABLE, MetricProvider
+
+logger = logging.getLogger(__name__)
 
 _STOP = {
     "the", "and", "for", "with", "from", "that", "this", "your", "our",
@@ -16,8 +22,6 @@ _STOP = {
     "before", "other", "only", "most", "such", "like", "best", "how",
     "to", "a", "an", "of", "in", "on", "at", "or", "by", "it", "is",
 }
-
-_LIGHT_STOP = {"the", "and", "for", "with", "from", "how", "to", "a", "an", "of", "in", "on", "best"}
 
 _QUESTION = re.compile(
     r"^(how|what|why|when|where|which|who|can|should|does|do|is|are)\b",
@@ -31,12 +35,14 @@ _BOILERPLATE = re.compile(
 )
 _NAV = re.compile(
     r"\b(home|menu|login|sign in|account|wishlist|filter|sort|"
-    r"related searches|skip to|add to cart|shop now)\b",
+    r"related searches|skip to|add to cart|shop now|asked questions|faqs?|"
+    r"final thoughts|table of contents|related posts)\b",
     re.I,
 )
 _BRANDISH = re.compile(
     r"\b(amazon|bewakoof|crazymonk|flipkart|myntra|ajio|nike|adidas|"
-    r"zara|h&m|uniqlo|walmart|ebay|etsy|shopify)\b",
+    r"zara|h&m|uniqlo|walmart|ebay|etsy|shopify|pinterest|instagram|"
+    r"facebook|tiktok|youtube|twitter)\b",
     re.I,
 )
 _GARMENTS = {
@@ -47,10 +53,157 @@ _GARMENTS = {
 _MAX_KEYWORD_WORDS = 7
 _MAX_KEYWORD_CHARS = 60
 
+_ARTICLES = {"a", "an", "the"}
+_CONJUNCTIONS = {
+    "and", "but", "or", "nor", "so", "yet", "because", "while", "although",
+    "if", "than", "as", "whether",
+}
+_PRONOUNS = {
+    "i", "me", "my", "we", "us", "our", "you", "your", "he", "she", "his",
+    "her", "it", "its", "they", "them", "their", "this", "that", "these",
+    "those", "one", "ones", "something", "anything", "everything", "what",
+    "which", "who", "whom", "whose",
+}
+_VERBS = {
+    "is", "are", "was", "were", "be", "been", "being", "am", "do", "does",
+    "did", "done", "have", "has", "had", "can", "could", "will", "would",
+    "shall", "should", "may", "might", "must", "come", "comes", "came", "get",
+    "gets", "got", "go", "goes", "make", "makes", "made", "take", "takes",
+    "add", "adds", "require", "requires", "need", "needs", "pair", "use",
+    "uses", "used", "look", "looks", "keep", "keeps", "give", "gives", "find",
+    "want", "try", "help", "helps", "work", "works", "become", "becomes",
+    "seem", "seems", "feel", "feels", "let", "put", "choose", "create",
+    "creates", "provide", "provides", "offer", "offers", "include",
+    "includes", "ensure", "protect", "protects", "prevent", "allow", "allows",
+    "bring", "brings", "turn", "show", "see", "know", "think", "say", "tell",
+    "love", "enjoy", "consider", "last", "lasts", "stay", "stays", "tend",
+    "tends", "depend", "depends", "vary", "varies", "replace", "clean", "wash",
+    "buy", "wipe", "measure", "select", "pick", "decorate", "mix", "arrange",
+    "remove", "apply", "place", "hang", "dry", "matter", "await", "explore",
+    "discover", "learn", "combine", "define", "weave", "transform",
+}
+_ING_NOUNS = {
+    "wedding", "bedding", "clothing", "sewing", "quilting", "stitching",
+    "knitting", "printing", "dining", "lighting", "building", "painting",
+    "ceiling", "spring", "string", "ring", "thing", "morning", "evening",
+    "cooking", "cleaning", "washing", "ironing", "flooring", "seating",
+    "serving", "setting", "layering", "padding", "lining", "piping",
+    "binding", "backing", "stuffing", "trimming", "beading", "digitizing",
+    "embroidering", "crocheting", "hemming", "packaging", "branding",
+}
+_EDITORIAL_ADJECTIVES = {
+    "passionate", "favorite", "favourite", "ultimate", "amazing", "wonderful",
+    "lovely", "stunning", "gorgeous", "fantastic", "awesome", "incredible",
+    "delightful", "exciting", "fascinating", "charming", "magical",
+    "exquisite", "breathtaking", "real", "pretty", "nice", "cute", "cool",
+    "great", "perfect", "fun",
+}
+_ADJECTIVE_ONLY = {
+    "cool", "chic", "casual", "neutral", "minimalist", "sporty", "trendy",
+    "viral", "retro", "sleek", "bold", "feminine", "flirty", "comfy", "cozy",
+    "everyday", "effortless", "honest", "fresh", "timeless", "chunky",
+}
+_ADVERB_SUFFIXES = (
+    "ally", "fully", "ously", "ively", "ently", "antly", "ably", "ibly",
+    "lessly", "edly", "ingly", "really",
+)
+_IDIOMS = [
+    "hard way", "long run", "end of the day", "at the end", "for what its worth",
+    "at the same time", "piece of cake", "best of both worlds", "game changer",
+    "go to", "at a glance", "in a nutshell", "tip of the iceberg",
+]
+CLOSING_SECTIONS = [
+    "final thoughts", "final words", "final verdict", "closing thoughts",
+    "concluding thoughts", "last words", "parting words", "parting thoughts",
+    "in conclusion", "to conclude", "wrapping up", "wrap up", "to sum up",
+    "summing up", "in summary", "key takeaways", "bottom line", "conclusion",
+    "summary", "verdict",
+]
+_FIGURATIVE_NOUNS = {
+    "journey", "realm", "world", "magic", "beauty", "essence", "secret",
+    "charm", "creativity", "passion", "inspiration", "adventure", "wonder",
+}
+_FIGURATIVE_OF_HEADS = _FIGURATIVE_NOUNS | {"art", "thread", "heart", "power", "touch", "tapestry"}
+_PLURAL_MODIFIERS = {
+    "kids", "mens", "womens", "sports", "arts", "news", "series", "species",
+    "christmas", "always",
+}
+_YEAR = re.compile(r"^(19|20)\d{2}$")
+_PREPOSITIONS = {
+    "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "onto",
+    "over", "under", "about", "around", "through", "between", "without",
+    "within", "during", "before", "after", "above", "below", "off", "out",
+    "up", "down", "per", "via", "like", "across", "along", "behind",
+    "beyond", "near", "upon", "vs", "versus", "regarding", "concerning",
+    "including",
+}
+_QUANTIFIERS = {
+    "many", "much", "more", "most", "some", "any", "all", "each", "every",
+    "few", "several", "various", "other", "another", "such", "same", "own",
+    "very", "really", "just", "also", "even", "still", "only", "too",
+    "quite", "often", "always", "never", "usually", "here", "there", "now",
+    "then", "when", "where", "why", "how", "well", "not", "no", "lots",
+    "both", "either", "neither",
+}
+_FILLER_NOUNS = {"kind", "kinds", "sort", "sorts", "lot", "bit", "number"}
+_GENERIC_ADJECTIVES = {
+    "different", "great", "good", "best", "better", "nice", "perfect", "easy",
+    "simple", "important", "new", "right", "wrong", "big", "little",
+    "beautiful", "ideal", "whole", "entire", "certain", "main", "possible",
+    "available", "sure", "able", "true", "real", "ready", "popular", "common",
+    "unique", "special", "typical", "usual", "general", "basic", "extra",
+    "stylish", "elegant", "practical", "durable", "versatile",
+}
+_GENERIC_HEADS = {
+    "type", "way", "thing", "idea", "option", "tip", "example", "variety",
+    "choice", "piece",
+}
+_VAGUE_HEADS = {"thing", "stuff", "lot", "bit", "something", "everything", "anything"}
+_INTERNAL_OK = {"of", "for", "with", "vs", "versus"}
+GAP_HIGH_RELEVANCE = 0.35
+GAP_MIN_RELEVANCE = 0.2
+_FUNCTION_WORDS = (
+    _ARTICLES | _CONJUNCTIONS | _PRONOUNS | _VERBS | _PREPOSITIONS
+    | _QUANTIFIERS | _FILLER_NOUNS
+)
+_COMMON_NOUNS = {
+    "size", "material", "design", "feature", "technique", "experience",
+    "damage", "care", "color", "colour", "pattern", "shape", "fabric",
+    "style", "decor", "table", "set", "mat", "linen", "cotton", "wool", "silk",
+    "leather", "cork", "wood", "bamboo", "vinyl", "plastic", "jute", "denim",
+    "velvet", "lace", "texture", "finish", "weight", "length", "width",
+    "price", "cost", "budget", "guide", "list", "chart", "occasion", "party",
+    "wedding", "dinner", "brunch", "holiday", "season", "home", "kitchen",
+    "room", "bed", "bedding", "sheet", "napkin", "runner", "tablecloth",
+    "placemat", "coaster", "quilt", "throw", "blanket", "towel", "hoodie",
+    "shirt", "outfit", "wardrobe", "fit", "trip", "itinerary", "temple",
+    "hotel", "food", "weather", "stain", "heat", "water", "surface",
+    "history", "origin", "meaning", "benefit", "quality", "comfort", "layer",
+    "theme", "palette", "centerpiece", "count", "stitch", "needle", "thread",
+    "hoop", "machine", "wear", "top", "skirt", "jean", "sneaker", "shoe",
+    "blazer", "sweater", "dress", "jacket", "boot",
+}
+_NOUN_SUFFIXES = (
+    "tion", "sion", "ment", "ness", "ity", "ance", "ence", "ship", "ure",
+    "ism", "age", "ery", "ics", "hood", "dom",
+)
+_ED_NOUNS = {"bed", "thread", "bread", "seed", "speed", "shed", "feed", "reed", "weed"}
+_PHRASE_BOUNDARY = re.compile(r"[.!?;:,\n\r|()\[\]{}\"“”•·–—/]+|\s-\s")
+_PHRASE_WORD = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def fold_accents(text: str) -> str:
+    """Fold accented letters to ASCII (appliqué -> applique) instead of dropping them."""
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _clean(text: str) -> str:
+    return fold_accents(text).lower().replace("'", "").replace("’", "")
+
 
 def _tokens(text: str) -> list[str]:
-    cleaned = (text or "").lower().replace("'", "").replace("’", "")
-    return re.findall(r"[a-z0-9]{3,}", cleaned)
+    return re.findall(r"[a-z0-9]{3,}", _clean(text))
 
 
 def _stem(token: str) -> str:
@@ -70,6 +223,207 @@ def content_tokens(text: str) -> list[str]:
 
 def normalize_phrase(text: str) -> str:
     return " ".join(content_tokens(text))
+
+
+def phrase_key(phrase: str) -> str:
+    """Order-insensitive key so "come different" and "different come" collapse."""
+    return " ".join(sorted(set(content_tokens(phrase)))) or (phrase or "").lower().strip()
+
+
+def _phrase_words(text: str) -> list[str]:
+    return _PHRASE_WORD.findall(_clean(text))
+
+
+def phrase_segments(text: str) -> list[list[str]]:
+    """Words per sentence/clause, so candidate phrases never cross a boundary."""
+    segments = []
+    for part in _PHRASE_BOUNDARY.split(text or ""):
+        words = _phrase_words(part)
+        if words:
+            segments.append(words)
+    return segments
+
+
+_CHUNK_SKIP_POS = {"DET", "PRON", "NUM", "ADV", "PUNCT", "SYM", "AUX", "CCONJ", "PART", "SPACE"}
+_CHUNK_HEAD_POS = {"NOUN", "PROPN"}
+_CHUNK_TEXT_LIMIT = 60000
+
+
+@lru_cache(maxsize=1)
+def _spacy_nlp():
+    """en_core_web_sm when installed and loadable; None keeps the word-list rules only."""
+    if os.getenv("ACL_DISABLE_SPACY", "").strip().lower() in {"1", "true", "yes"}:
+        return None
+    try:
+        import spacy
+
+        return spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
+    except Exception as exc:
+        logger.info("spaCy noun-chunk gate disabled: %s", exc)
+        return None
+
+
+def _chunk_tokens(chunk) -> list:
+    tokens = list(chunk)
+    while tokens and tokens[0].pos_ in _CHUNK_SKIP_POS:
+        tokens = tokens[1:]
+    return tokens
+
+
+def _join_tokens(tokens) -> str:
+    raw = "".join(getattr(token, "text_with_ws", f"{token.text} ") for token in tokens)
+    return " ".join(_phrase_words(raw))
+
+
+def noun_chunk_phrases(text: str) -> Optional[set[str]]:
+    """Sub-spans of spaCy noun chunks that end on a noun, plus "X of/for/with/vs Y" joins.
+
+    Returns None when spaCy is unavailable so callers fall back to search_phrase_check alone.
+    """
+    nlp = _spacy_nlp()
+    if nlp is None:
+        return None
+    parts = [part for part in _PHRASE_BOUNDARY.split((text or "")[:_CHUNK_TEXT_LIMIT]) if part.strip()]
+    allowed: set[str] = set()
+    for doc in nlp.pipe(parts, batch_size=64):
+        chunks = list(doc.noun_chunks)
+        for chunk in chunks:
+            tokens = _chunk_tokens(chunk)
+            for end, token in enumerate(tokens):
+                if token.pos_ not in _CHUNK_HEAD_POS:
+                    continue
+                for start in range(end + 1):
+                    if tokens[start].pos_ not in _CHUNK_SKIP_POS:
+                        allowed.add(_join_tokens(tokens[start:end + 1]))
+        for left, right in zip(chunks, chunks[1:]):
+            joiner = doc[left.end].text.lower() if left.end < len(doc) else ""
+            if right.start != left.end + 1 or joiner not in _INTERNAL_OK:
+                continue
+            left_tokens, right_tokens = _chunk_tokens(left), _chunk_tokens(right)
+            if not left_tokens or not right_tokens:
+                continue
+            if left_tokens[-1].pos_ not in _CHUNK_HEAD_POS or right_tokens[-1].pos_ not in _CHUNK_HEAD_POS:
+                continue
+            tail = _join_tokens(right_tokens)
+            for start in range(len(left_tokens)):
+                allowed.add(f"{_join_tokens(left_tokens[start:])} {joiner} {tail}")
+    allowed.discard("")
+    return allowed
+
+
+def _is_function_word(word: str) -> bool:
+    return word in _FUNCTION_WORDS or _stem(word) in _VERBS
+
+
+def domain_nouns(*texts: str) -> set[str]:
+    """Noun-ish stems from the title, H1/H2s, and target keyword."""
+    nouns: set[str] = set()
+    for text in texts:
+        for word in _phrase_words(text):
+            if len(word) < 3 or any(ch.isdigit() for ch in word):
+                continue
+            if _is_function_word(word) or word in _GENERIC_ADJECTIVES or word.endswith("ly"):
+                continue
+            if word in _EDITORIAL_ADJECTIVES or word in _ADJECTIVE_ONLY:
+                continue
+            if word.endswith("ing") and word not in _ING_NOUNS:
+                continue
+            nouns.add(_stem(word))
+    return nouns
+
+
+def _contains_run(words: list[str], target: list[str]) -> bool:
+    size = len(target)
+    return any(words[index:index + size] == target for index in range(len(words) - size + 1))
+
+
+def is_closing_section(text: str) -> bool:
+    """Conclusion/closing labels ("Final Words", "Wrapping Up", "Verdict") in any path."""
+    words = fold_tokens(text)
+    for item in CLOSING_SECTIONS:
+        target = fold_tokens(item)
+        if words == target or (len(target) > 1 and _contains_run(words, target)):
+            return True
+    return False
+
+
+def _is_idiom(words: list[str]) -> bool:
+    folded = [_stem(word) for word in words]
+    return any(_contains_run(folded, fold_tokens(item)) for item in _IDIOMS)
+
+
+def _plausible_noun(word: str, nouns: set[str]) -> bool:
+    stem = _stem(word)
+    if _is_function_word(word) or word in _GENERIC_ADJECTIVES or word.endswith("ly"):
+        return False
+    if word in _ADJECTIVE_ONLY or word in _EDITORIAL_ADJECTIVES:
+        return False
+    if word.endswith("ed") and len(word) > 4 and word not in _ED_NOUNS:
+        return False
+    if stem in nouns or stem in _COMMON_NOUNS or word in _ING_NOUNS:
+        return True
+    if word.endswith("ing"):
+        return False
+    if word.endswith(_NOUN_SUFFIXES):
+        return True
+    return _is_plural(word)
+
+
+def _is_plural(word: str) -> bool:
+    return word.endswith("s") and not word.endswith(("ss", "us", "is")) and len(word) > 3
+
+
+def search_phrase_check(phrase: str, nouns: Optional[set[str]] = None) -> str:
+    """Return "" when the phrase is noun-phrase shaped, else a rejection reason."""
+    words = _phrase_words(phrase)
+    if not 2 <= len(words) <= 4:
+        return "word_count"
+    if any(ch.isdigit() for word in words for ch in word):
+        return "number"
+    if is_closing_section(phrase):
+        return "closing_section"
+    if _is_idiom(words):
+        return "idiom"
+    if _is_function_word(words[0]):
+        return "leading_function_word"
+    if words[0].endswith(_ADVERB_SUFFIXES):
+        return "leading_adverb"
+    if words[0].endswith("ing") and words[0] not in _ING_NOUNS:
+        return "leading_verb_form"
+    if words[0] in _EDITORIAL_ADJECTIVES:
+        return "subjective_modifier"
+    if _is_function_word(words[-1]) or words[-1] in _GENERIC_ADJECTIVES:
+        return "trailing_function_word"
+    if words[-1] in {"mens", "womens"}:
+        return "trailing_modifier"
+    if _stem(words[-1]) in _VAGUE_HEADS or words[-1] in _VAGUE_HEADS:
+        return "vague_head"
+    if any(_is_function_word(word) and word not in _INTERNAL_OK for word in words[1:-1]):
+        return "internal_function_word"
+    if not _plausible_noun(words[-1], nouns or set()):
+        return "not_noun_phrase"
+    if _stem(words[-1]) in _FIGURATIVE_NOUNS or any(
+        right == "of" and _stem(left) in _FIGURATIVE_OF_HEADS
+        for left, right in zip(words, words[1:])
+    ):
+        return "figurative_phrase"
+    for left, right in zip(words, words[1:]):
+        if (
+            _is_plural(left)
+            and left not in _PLURAL_MODIFIERS
+            and right not in _INTERNAL_OK
+            and not _is_plural(right)
+        ):
+            return "subject_verb_shape"
+    if _stem(words[-1]) in _GENERIC_HEADS and all(
+        word in _GENERIC_ADJECTIVES or word in _QUANTIFIERS for word in words[:-1]
+    ):
+        return "generic_head"
+    return ""
+
+
+def is_search_phrase(phrase: str, nouns: Optional[set[str]] = None) -> bool:
+    return not search_phrase_check(phrase, nouns)
 
 
 def _intent(phrase: str, url: str = "") -> str:
@@ -112,8 +466,7 @@ def article_intent(keyword: str, page: Optional[dict[str, Any]]) -> str:
 
 
 def fold_tokens(text: str) -> list[str]:
-    cleaned = (text or "").lower().replace("'", "").replace("’", "")
-    return [_stem(token) for token in re.findall(r"[a-z0-9]+", cleaned) if len(token) > 1]
+    return [_stem(token) for token in re.findall(r"[a-z0-9]+", _clean(text)) if len(token) > 1]
 
 
 def fold_phrase(text: str) -> str:
@@ -225,7 +578,7 @@ def validate_keyword(
         "appears_in_body": source in {"body", "opening", "meta", "heading"},
         "appears_in_meta": source == "meta",
         "is_brand_phrase": _is_brand_phrase(raw, domains),
-        "is_navigation_phrase": bool(_NAV.search(raw)),
+        "is_navigation_phrase": bool(_NAV.search(raw)) or is_closing_section(raw),
         "is_page_title_only": bool(page_title and raw.lower() == page_title.lower()),
         "intent": _intent(raw),
         "relevance_to_target_topic": effective_rel,
@@ -296,31 +649,49 @@ def extract_terms(
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     head_blob = " ".join(headings or []).lower()
-    body = (text or "").lower()
     meta_l = (meta or "").lower()
-    words = [w for w in _tokens(body + " " + head_blob + " " + meta_l) if w not in _STOP]
+    nouns = domain_nouns(page_title, keyword, *(headings or []))
     grams: Counter[str] = Counter()
-    for size in (2, 3, 4):
-        for index in range(len(words) - size + 1):
-            phrase = " ".join(words[index:index + size])
-            if any(part in _LIGHT_STOP for part in phrase.split()[:1]):
+
+    def collect(blob: str, weight: int) -> None:
+        allowed = noun_chunk_phrases(blob)
+        for words in phrase_segments(blob):
+            if len(words) <= 4 and any(_YEAR.match(word) for word in words):
                 continue
-            grams[phrase] += 1
+            for size in (2, 3, 4):
+                for index in range(len(words) - size + 1):
+                    phrase = " ".join(words[index:index + size])
+                    if allowed is not None and phrase not in allowed:
+                        continue
+                    if is_search_phrase(phrase, nouns):
+                        grams[phrase] += weight
+
+    collect(text or "", 1)
+    collect(meta or "", 1)
     for heading in headings or []:
-        clean = " ".join(_tokens(heading))
-        if 1 < len(clean.split()) <= _MAX_KEYWORD_WORDS:
+        collect(heading, 3)
+        words = _phrase_words(heading)
+        clean = " ".join(words)
+        if 2 < len(words) <= _MAX_KEYWORD_WORDS and _QUESTION.match(clean):
             grams[clean] += 3
     kw = " ".join(_tokens(keyword or ""))
     if kw:
         grams[kw] += 6
 
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    rejected: list[dict[str, Any]] = []
-    for phrase, freq in grams.most_common(160):
-        if phrase in seen:
+    merged: dict[str, tuple[str, int]] = {}
+    for phrase, freq in grams.items():
+        key = phrase_key(phrase)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = (phrase, freq)
             continue
-        seen.add(phrase)
+        best = phrase if freq > current[1] else current[0]
+        merged[key] = (best, current[1] + freq)
+    ranked = sorted(merged.values(), key=lambda item: -item[1])
+
+    rows: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for phrase, freq in ranked[:160]:
         source = "body"
         if phrase in head_blob:
             source = "heading"
@@ -367,6 +738,7 @@ def compare_keywords(
     yours: Optional[dict[str, Any]],
     competitors: list[dict[str, Any]],
     *,
+    serp_phrases: Optional[list[str]] = None,
     debug: bool = False,
 ) -> dict[str, Any]:
     article_intent_label = article_intent(keyword, yours)
@@ -407,7 +779,7 @@ def compare_keywords(
         page_relevance=your_rel,
         debug=debug,
     ):
-        catalog[term["keyword"]] = term
+        catalog[phrase_key(term["keyword"])] = term
 
     editorial = [
         row for row in competitors
@@ -434,10 +806,37 @@ def compare_keywords(
             page_relevance=page_rel,
             debug=debug,
         ):
-            catalog.setdefault(term["keyword"], term)
+            catalog.setdefault(phrase_key(term["keyword"]), term)
+
+    serp_nouns = domain_nouns(your_title, keyword, *your_heads)
+    for phrase in serp_phrases or []:
+        phrase = " ".join(_phrase_words(phrase))
+        if not is_search_phrase(phrase, serp_nouns):
+            continue
+        flags = validate_keyword(
+            phrase,
+            keyword,
+            source="serp",
+            article_intent_label=article_intent_label,
+            domains=domains,
+        )
+        if not flags["accepted"]:
+            continue
+        catalog.setdefault(phrase_key(phrase), {
+            "keyword": phrase,
+            "type": _classify(phrase, keyword),
+            "frequency": 1,
+            "prominence": "medium",
+            "placement": "serp",
+            "search_intent": flags["intent"],
+            "search_volume": UNAVAILABLE,
+            "keyword_difficulty": UNAVAILABLE,
+            "page_title_signal": False,
+            "relevance_score": flags["semantic_similarity"],
+        })
 
     if keyword:
-        catalog[keyword.lower().strip()] = {
+        catalog[phrase_key(keyword)] = {
             "keyword": keyword.strip(),
             "type": "primary",
             "frequency": 6,
@@ -452,7 +851,8 @@ def compare_keywords(
 
     table = []
     gaps = []
-    for phrase, meta in catalog.items():
+    for meta in catalog.values():
+        phrase = meta["keyword"]
         match = match_status(
             phrase,
             your_haystack,
@@ -481,10 +881,20 @@ def compare_keywords(
         if title_only and meta.get("placement") != "heading":
             continue
         status = match["status"]
-        if in_comp and status == "missing":
-            opportunity = "high" if meta.get("relevance_score", 0) >= 0.35 else "medium"
+        relevance = meta.get("relevance_score") or 0
+        widely_used = competitor_count >= min(2, max(1, len(editorial)))
+        if in_comp and status == "missing" and (widely_used or relevance >= GAP_HIGH_RELEVANCE):
+            opportunity = "high"
             recommendation = "Cover this subtopic in a natural H2; do not force exact-match stuffing."
             priority = "high-priority"
+        elif in_comp and status == "missing" and relevance >= GAP_MIN_RELEVANCE:
+            opportunity = "medium"
+            recommendation = "Cover briefly if it fits your angle; only some competitors use it."
+            priority = "medium-priority"
+        elif in_comp and status == "missing":
+            opportunity = "low"
+            recommendation = "Low overlap with your target keyword; skip unless it fits your angle."
+            priority = "low-priority"
         elif in_comp and status == "close_variant":
             opportunity = "low"
             recommendation = "Keep the natural variant already used; no exact-match stuffing."
@@ -532,4 +942,155 @@ def compare_keywords(
         "article_intent": article_intent_label,
         "disclaimer": "Search volume and keyword difficulty are Data unavailable unless a third-party API is configured. Close variants count as present; do not stuff exact match.",
         "debug_rejections": [] if not debug else [],
+    }
+
+
+def keyword_focus(
+    keyword: str,
+    table: list[dict[str, Any]],
+    gsc: Optional[dict[str, Any]] = None,
+    *,
+    competitor_total: int = 0,
+    country: str = "us",
+    per_group: int = 3,
+    metrics: MetricProvider = DEFAULT_METRICS,
+) -> dict[str, Any]:
+    """Pick at most `per_group` keywords for each of: our blog, competitors, opportunities.
+
+    Performance for our blog comes from Search Console when connected; otherwise
+    from on-page usage. Volume is only shown when a metric provider returns it.
+    """
+    target_key = phrase_key(keyword) if keyword else ""
+    used: set[str] = set()
+    gsc = gsc or {}
+    queries = [
+        row for row in (gsc.get("queries") or [])
+        if gsc.get("status") == "ok" and row.get("query") and not row.get("branded")
+    ]
+    has_gsc = bool(queries)
+
+    def volume_of(phrase: str) -> Any:
+        try:
+            value = metrics.keyword_volume(phrase, country)
+        except Exception:
+            value = None
+        return UNAVAILABLE if value is None else value
+
+    def take(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        picked = []
+        for item in candidates:
+            key = phrase_key(item["keyword"])
+            if not key or key in used:
+                continue
+            used.add(key)
+            picked.append({**item, "search_volume": volume_of(item["keyword"])})
+            if len(picked) >= per_group:
+                break
+        return picked
+
+    def gsc_evidence(row: dict[str, Any]) -> str:
+        return (
+            f"{int(row.get('clicks') or 0)} clicks · {int(row.get('impressions') or 0)} impressions"
+            f" · avg position {float(row.get('position') or 0):.1f}"
+        )
+
+    if has_gsc:
+        page_one = [r for r in queries if 0 < (r.get("position") or 0) <= 10]
+        ranked = sorted(page_one, key=lambda r: (-(r.get("clicks") or 0), -(r.get("impressions") or 0)))
+        ours = take([
+            {"keyword": r["query"], "evidence": gsc_evidence(r), "source": "search_console"}
+            for r in ranked
+        ])
+    else:
+        on_page = [
+            row for row in table
+            if row.get("my_blog_status") == "exact"
+        ]
+        on_page.sort(key=lambda r: (
+            r.get("type") != "primary",
+            r.get("prominence") != "high",
+            -(r.get("frequency") or 0),
+            -(r.get("relevance_score") or 0),
+        ))
+        ours = take([
+            {
+                "keyword": r["keyword"],
+                "evidence": f"Used {int(r.get('frequency') or 0)}× on your page"
+                + (f" · in {r['placement']}" if r.get("placement") in {"heading", "opening", "meta"} else ""),
+                "source": "on_page",
+            }
+            for r in on_page
+        ])
+
+    comp_rows = [
+        row for row in table
+        if row.get("found_in_competitor") and phrase_key(row.get("keyword") or "") != target_key
+    ]
+    comp_rows.sort(key=lambda r: (
+        -(r.get("competitor_count") or 0),
+        -(r.get("frequency") or 0),
+        -(r.get("relevance_score") or 0),
+    ))
+    total = max(competitor_total, max((r.get("competitor_count") or 0 for r in comp_rows), default=0))
+    competitors = take([
+        {
+            "keyword": r["keyword"],
+            "evidence": f"Used by {int(r.get('competitor_count') or 0)} of {total} competitors"
+            + ("" if r.get("found_in_my_blog") else " · missing from your page"),
+            "source": "competitors",
+        }
+        for r in comp_rows
+    ])
+
+    candidates: list[dict[str, Any]] = []
+    if has_gsc:
+        striking = [r for r in queries if (r.get("position") or 0) > 10 and (r.get("impressions") or 0) > 0]
+        striking.sort(key=lambda r: -(r.get("impressions") or 0))
+        candidates.extend(
+            {
+                "keyword": r["query"],
+                "evidence": f"{int(r.get('impressions') or 0)} impressions but avg position "
+                f"{float(r.get('position') or 0):.1f}; you already get search demand for it",
+                "source": "search_console",
+                "_rank": (0, -(r.get("impressions") or 0)),
+            }
+            for r in striking
+        )
+    gap_rows = [
+        row for row in table
+        if row.get("my_blog_status") == "missing"
+        and phrase_key(row.get("keyword") or "") != target_key
+        and (row.get("relevance_score") or 0) >= 0.35
+    ]
+    candidates.extend(
+        {
+            "keyword": r["keyword"],
+            "evidence": "Relevant to your target keyword and missing from your page"
+            + (f" · used by {int(r.get('competitor_count') or 0)} competitors" if r.get("competitor_count") else ""),
+            "source": "gap",
+            "_rank": (1, -(r.get("competitor_count") or 0), -(r.get("relevance_score") or 0)),
+        }
+        for r in gap_rows
+    )
+    known = {c["keyword"]: volume_of(c["keyword"]) for c in candidates}
+    candidates.sort(key=lambda c: (
+        not isinstance(known[c["keyword"]], int),
+        -(known[c["keyword"]] if isinstance(known[c["keyword"]], int) else 0),
+        c["_rank"],
+    ))
+    opportunities = take([{k: v for k, v in c.items() if k != "_rank"} for c in candidates])
+
+    volume_known = any(isinstance(item["search_volume"], int) for item in opportunities)
+    return {
+        "our_blog": ours,
+        "our_blog_basis": "search_console" if has_gsc else "on_page",
+        "competitors": competitors,
+        "opportunities": opportunities,
+        "opportunities_basis": "volume" if volume_known else ("search_console" if has_gsc else "relevance"),
+        "note": (
+            "" if volume_known else
+            "Search volume: Data unavailable (no volume API configured). Opportunities are ranked by "
+            + ("Search Console impressions, then " if has_gsc else "")
+            + "relevance to your target keyword and competitor use."
+        ),
     }

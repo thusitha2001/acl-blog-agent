@@ -125,6 +125,7 @@ def content_gaps(
     mine.append(_norm((yours or {}).get("title") or ""))
     body = ((yours or {}).get("full_text") or (yours or {}).get("text") or "").lower()
     covered: dict[str, dict[str, Any]] = {}
+    contributing: set[str] = set()
     for row in competitors:
         intent = classify_page_intent(row)
         if article_intent_label == "informational" and intent in {"transactional", "navigational"}:
@@ -143,6 +144,8 @@ def content_gaps(
             slot = covered.setdefault(heading.strip(), {"domains": [], "intent": intent, "heading": heading.strip()})
             if domain and domain not in slot["domains"]:
                 slot["domains"].append(domain)
+            contributing.add(domain or row.get("url") or "")
+    editorial_count = len(contributing)
 
     rows = []
     for heading, meta in covered.items():
@@ -151,6 +154,12 @@ def content_gaps(
         if heading.lower() in body:
             continue
         domains = meta["domains"]
+        if (
+            editorial_count >= 2
+            and len(domains) < 2
+            and not set(content_tokens(heading)) & set(content_tokens(keyword))
+        ):
+            continue
         importance = "high" if len(domains) >= 2 else "medium"
         rec = heading if heading.endswith("?") else heading.rstrip(".")
         rows.append({
@@ -391,7 +400,7 @@ def humanization_report(text: str) -> dict[str, Any]:
             "score": None,
             "status": "unavailable",
             "reason": "Article text could not be extracted.",
-            "interpretation": "Writing-naturalness analysis — not definitive AI detection.",
+            "interpretation": "Writing-naturalness analysis.",
             "metrics": {},
             "warnings": [],
             "ai_like_phrases": [],
@@ -409,7 +418,7 @@ def humanization_report(text: str) -> dict[str, Any]:
     found = [p for p in AI_FILLER_PHRASES if p in (text or "").lower()][:8]
     return {
         "score": score,
-        "interpretation": "Writing-naturalness analysis — not definitive AI detection.",
+        "interpretation": "Writing-naturalness analysis.",
         "metrics": metrics,
         "warnings": warnings[:8],
         "ai_like_phrases": found,
@@ -422,12 +431,159 @@ def humanization_report(text: str) -> dict[str, Any]:
     }
 
 
+_GENERIC_ALTS = {
+    "hero", "image", "photo", "banner", "picture", "img", "graphic", "thumbnail",
+    "untitled", "featured image", "blog image", "header image", "placeholder",
+}
+_FILE_ALT = re.compile(r"^(img|dsc|pxl|image|photo|screenshot|untitled)[\s_-]*\d*$|\.(jpe?g|png|webp|gif|avif)$", re.I)
+ALT_MAX_CHARS = 125
+
+
+def _generic_alt(alt: str) -> bool:
+    lowered = alt.lower().strip()
+    if lowered in _GENERIC_ALTS or _FILE_ALT.search(lowered):
+        return True
+    return " " not in lowered and ("-" in lowered or "_" in lowered)
+
+
+def _suggest_alt(image: dict[str, Any]) -> tuple[str, str]:
+    caption = image.get("caption") or ""
+    words = image.get("filename_words") or []
+    if caption:
+        base, basis = caption, "caption"
+    elif len(words) >= 2:
+        base, basis = " ".join(words).capitalize(), "file name"
+    else:
+        return "", ""
+    if len(base) > ALT_MAX_CHARS:
+        base = base[:ALT_MAX_CHARS].rsplit(" ", 1)[0]
+    return base, basis
+
+
+def _image_filename(src: str) -> str:
+    return (src or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1][:80]
+
+
+def image_alt_report(
+    yours: Optional[dict[str, Any]],
+    competitors: list[dict[str, Any]],
+    keyword: str = "",
+) -> dict[str, Any]:
+    """Per-image alt-text issues for your article plus how competitors use images."""
+    if not yours:
+        return {"status": "unavailable", "reason": "Add a blog URL to audit its images.", "items": [], "recommendations": []}
+    images = list(yours.get("images") or [])
+    kw = " ".join(content_tokens(keyword))
+    alt_counts: dict[str, int] = {}
+    for image in images:
+        key = image.get("alt", "").lower().strip()
+        if key:
+            alt_counts[key] = alt_counts.get(key, 0) + 1
+    with_kw = [
+        image for image in images
+        if kw and kw in " ".join(content_tokens(image.get("alt") or ""))
+    ]
+    stuffing = len(with_kw) >= 3 and len(with_kw) > len(images) / 2
+    summary = {key: 0 for key in ("total", "ok", "missing", "empty", "generic", "too_long", "stuffed", "duplicate", "decorative")}
+    summary["total"] = len(images)
+    items: list[dict[str, Any]] = []
+    seen_kw = 0
+    for image in images:
+        alt = image.get("alt") or ""
+        issue, severity, kind = "", "", ""
+        if image.get("decorative") and not alt:
+            summary["decorative"] += 1
+            continue
+        if not image.get("has_alt_attr"):
+            issue, severity, kind = "No alt attribute", "high", "missing"
+        elif not alt:
+            issue, severity, kind = "Empty alt (only right for purely decorative images)", "medium", "empty"
+        elif _generic_alt(alt):
+            issue, severity, kind = "Generic or file-name alt text", "high", "generic"
+        elif len(alt) > ALT_MAX_CHARS:
+            issue, severity, kind = f"Longer than {ALT_MAX_CHARS} characters", "low", "too_long"
+        elif stuffing and image in with_kw:
+            seen_kw += 1
+            if seen_kw > 1:
+                issue, severity, kind = "Target keyword repeated across most alts", "medium", "stuffed"
+        if not issue and alt and alt_counts.get(alt.lower().strip(), 0) > 1:
+            issue, severity, kind = "Same alt text as another image", "low", "duplicate"
+        if not issue:
+            summary["ok"] += 1
+            continue
+        summary[kind] += 1
+        suggestion, basis = _suggest_alt(image)
+        items.append({
+            "src": image.get("src") or "",
+            "filename": _image_filename(image.get("src") or ""),
+            "section": image.get("section") or "",
+            "alt": alt,
+            "issue": issue,
+            "severity": severity,
+            "suggested_alt": suggestion or (alt[:ALT_MAX_CHARS].rsplit(" ", 1)[0] if kind == "too_long" else ""),
+            "suggestion_basis": basis,
+        })
+    order = {"high": 0, "medium": 1, "low": 2}
+    items.sort(key=lambda item: order.get(item["severity"], 3))
+
+    comp_pages = [
+        row for row in competitors
+        if not row.get("intent_mismatch") and not row.get("topic_mismatch") and row.get("images") is not None
+    ]
+    comp_summary = None
+    if comp_pages:
+        counts = [len(row.get("images") or []) for row in comp_pages]
+        described = []
+        for row in comp_pages:
+            imgs = [img for img in row.get("images") or [] if not img.get("decorative")]
+            if imgs:
+                good = sum(1 for img in imgs if img.get("alt") and not _generic_alt(img["alt"]))
+                described.append(good / len(imgs) * 100)
+        comp_summary = {
+            "pages": len(comp_pages),
+            "avg_images": round(sum(counts) / len(counts), 1),
+            "avg_descriptive_pct": round(sum(described) / len(described)) if described else None,
+        }
+
+    recs: list[str] = []
+    fix_n = summary["missing"] + summary["generic"] + summary["empty"]
+    if fix_n:
+        recs.append(
+            f"Write descriptive alt text for {fix_n} image{'s' if fix_n != 1 else ''}: "
+            "say what the image shows in one short sentence."
+        )
+    if stuffing:
+        recs.append(f"Use “{keyword}” in at most one alt (the main image) and describe the rest plainly.")
+    if summary["too_long"]:
+        recs.append(f"Trim {summary['too_long']} alt text(s) to under {ALT_MAX_CHARS} characters.")
+    if comp_summary and comp_summary["avg_images"] - len(images) >= 3:
+        pictured = {image.get("section") for image in images}
+        bare = [h for h in (yours.get("h2_headings") or []) if h not in pictured][:3]
+        tail = f" Candidates: {', '.join('“' + h + '”' for h in bare)}." if bare else ""
+        recs.append(
+            f"Competitors average {comp_summary['avg_images']:g} article images; you have {len(images)}. "
+            f"Add original photos or diagrams to sections without one.{tail}"
+        )
+    if not images:
+        recs.append("Your article has no images. Add at least one original image near the top with descriptive alt text.")
+    return {
+        "status": "ok",
+        "reason": None,
+        "summary": summary,
+        "items": items[:20],
+        "competitors": comp_summary,
+        "recommendations": recs[:4],
+        "note": "Suggested alt text is drafted from the image caption or file name. Check it matches what the image actually shows.",
+    }
+
+
 def action_plan(
     yours: Optional[dict[str, Any]],
     your_scores: dict[str, Any],
     keyword_gaps: dict[str, Any],
     gaps: dict[str, Any],
     readability: dict[str, Any],
+    images: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -467,6 +623,12 @@ def action_plan(
         add("Medium Priority", "Readability", "Dense sentences on the extracted article",
             "Shorten 25+ word sentences and add a 40–60 word answer block.",
             "Scanability", "Low")
+    summary = (images or {}).get("summary") or {}
+    alt_fixes = summary.get("missing", 0) + summary.get("generic", 0) + summary.get("empty", 0)
+    if alt_fixes:
+        add("Medium Priority", "Images", f"{alt_fixes} of {summary.get('total', 0)} article images lack descriptive alt text",
+            "Describe what each image shows in one short sentence; see the Images & alt text section for drafts.",
+            "Image search and accessibility", "Low")
     if not (yours or {}).get("schema_types"):
         add("Medium Priority", "AEO", "No JSON-LD schema detected",
             "Add Article/FAQPage markup that matches visible FAQs.",

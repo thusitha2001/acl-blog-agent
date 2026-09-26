@@ -11,22 +11,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from acl_agent.auto_brief import (
+    SERPAnalysis,
     SERPResult,
-    analyze_serp,
-    extract_headings_from_snippets,
-    extract_nlp_keywords,
     search_serp,
 )
 from acl_agent.analysis_input import (
     analysis_mode,
     average_competitor_scores,
-    detect_keyword_from_article,
     page_full_text,
     validate_blog_url,
 )
@@ -35,11 +32,25 @@ from acl_agent.analysis_report import (
     citation_opportunities,
     content_gaps,
     humanization_report,
+    image_alt_report,
     originality_report,
     traffic_reasons,
 )
 from acl_agent.config import logger
-from acl_agent.keywords import article_intent, classify_page_intent, compare_keywords
+from acl_agent.gsc_diagnosis import (
+    diagnosis_window,
+    build_diagnosis_summary,
+    diagnose_page_visibility,
+    merge_gsc_actions,
+    unavailable_diagnosis,
+)
+from acl_agent.keywords import (
+    article_intent,
+    classify_page_intent,
+    compare_keywords,
+    is_closing_section,
+    keyword_focus,
+)
 from acl_agent.metrics import UNAVAILABLE
 from acl_agent.models import ContentBrief, SEOAnalysis
 from acl_agent.readability import analyze_readability
@@ -629,6 +640,67 @@ def _first_number_word_index(text: str) -> Optional[int]:
     return None
 
 
+_FILENAME_NOISE = {
+    "img", "image", "images", "photo", "pic", "picture", "untitled", "design", "copy", "final",
+    "edited", "scaled", "large", "small", "medium", "thumb", "thumbnail", "banner", "hero",
+    "dsc", "pxl", "screenshot", "min", "web", "jpg", "jpeg", "png", "webp", "gif", "file",
+    "upload", "uploads", "new", "resized", "cropped", "crop", "version", "progressive",
+}
+
+
+def _filename_words(src: str) -> list[str]:
+    name = unquote(urlparse(src).path.rsplit("/", 1)[-1]).lower()
+    name = re.sub(r"\.[a-z0-9]{2,5}$", "", name)
+    name = re.sub(r"[-_]\d+x\d+$", "", name)
+    words = []
+    for word in re.split(r"[^a-z0-9]+", name):
+        if len(word) < 3 or not word.isalpha() or word in _FILENAME_NOISE:
+            continue
+        if len(word) > 14:
+            continue
+        words.append(word)
+    return words[:8]
+
+
+def _int_attr(value: Any) -> Optional[int]:
+    match = re.match(r"\s*(\d+)", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def _image_inventory(root, url: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Article images in document order with the section heading they sit under."""
+    items: list[dict[str, Any]] = []
+    if root is None:
+        return items
+    section = ""
+    for node in root.find_all(["h1", "h2", "h3", "img"]):
+        if node.name != "img":
+            section = " ".join(node.get_text(" ", strip=True).split())[:160]
+            continue
+        src = str(node.get("src") or node.get("data-src") or node.get("data-lazy-src") or "")
+        if not src or src.startswith("data:"):
+            continue
+        width, height = _int_attr(node.get("width")), _int_attr(node.get("height"))
+        if width and height and width <= 48 and height <= 48:
+            continue
+        figure = node.find_parent("figure")
+        caption_node = figure.find("figcaption") if figure else None
+        caption = " ".join(caption_node.get_text(" ", strip=True).split())[:200] if caption_node else ""
+        items.append({
+            "src": urljoin(url, src),
+            "alt": " ".join(str(node.get("alt") or "").split()),
+            "has_alt_attr": node.has_attr("alt"),
+            "decorative": str(node.get("role") or "").lower() == "presentation"
+            or str(node.get("aria-hidden") or "").lower() == "true",
+            "caption": caption,
+            "section": section,
+            "filename_words": _filename_words(src),
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _onpage_signals(soup, url: str, headers: dict[str, str]) -> dict[str, Any]:
     """Live HTML facts used by the gap report. Extracted before scripts are stripped."""
     meta = _robots_and_canonical(soup, url)
@@ -658,6 +730,7 @@ def _onpage_signals(soup, url: str, headers: dict[str, str]) -> dict[str, Any]:
     cleaned = BeautifulSoup(str(root), "html.parser")
     _strip_chrome(cleaned)
     faq = _faq_audit(cleaned)
+    article_images = _image_inventory(cleaned, url)
     h3 = _heading_texts(cleaned, "h3")
     h4 = _heading_texts(cleaned, "h4")
     tables = len(cleaned.find_all("table")) if cleaned else 0
@@ -683,6 +756,7 @@ def _onpage_signals(soup, url: str, headers: dict[str, str]) -> dict[str, Any]:
         "author": author[:120],
         "image_count": len(images),
         "generic_alts": sum(1 for item in images if item["generic"]),
+        "images": article_images,
         "table_count": tables,
         "h3_count": len(h3),
         "h4_count": len(h4),
@@ -964,6 +1038,21 @@ def _keyword_tokens(keyword: str) -> list[str]:
     return tokens[:5]
 
 
+def _fold_match_blob(*parts: str) -> str:
+    return " ".join(str(part or "") for part in parts).lower().replace("'", "").replace("’", "")
+
+
+def _token_matches(token: str, blob: str) -> bool:
+    variants = {token}
+    if token.endswith("ies") and len(token) > 4:
+        variants.add(token[:-3] + "y")
+    if token.endswith("es") and len(token) > 4:
+        variants.add(token[:-2])
+    if token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+        variants.add(token[:-1])
+    return any(variant in blob for variant in variants)
+
+
 def _core_topic_terms(tokens: list[str]) -> set[str]:
     money = {"cost", "budget", "price", "prices", "pricing", "fee", "fees", "fare", "cheap"}
     product = {"tablecloth", "tablecloths", "linen", "linens", "bedding"}
@@ -977,9 +1066,9 @@ def _core_topic_terms(tokens: list[str]) -> set[str]:
 
 def _serp_relevance(keyword: str, title: str, url: str, snippet: str) -> int:
     tokens = _keyword_tokens(keyword)
-    title_l = (title or "").lower()
-    url_l = (url or "").lower()
-    snip_l = (snippet or "").lower()
+    title_l = _fold_match_blob(title)
+    url_l = _fold_match_blob(url)
+    snip_l = _fold_match_blob(snippet)
     blob = f"{title_l} {url_l} {snip_l}"
     if not tokens:
         return 1
@@ -994,14 +1083,14 @@ def _serp_relevance(keyword: str, title: str, url: str, snippet: str) -> int:
         return -5
     hits = 0
     for token in tokens:
-        if token in title_l:
+        if _token_matches(token, title_l):
             hits += 2
-        elif token in url_l:
+        elif _token_matches(token, url_l):
             hits += 2
-        elif token in snip_l:
+        elif _token_matches(token, snip_l):
             hits += 1
     core = _core_topic_terms(tokens)
-    if core and not any(term in blob for term in core):
+    if core and not any(_token_matches(term, blob) or term in blob for term in core):
         return -2
     path = urlparse(url).path.rstrip("/")
     if not path and hits < 3:
@@ -1015,8 +1104,8 @@ SERP_CANDIDATE_LIMIT = 10
 
 def _unique_token_hits(keyword: str, title: str, url: str, snippet: str) -> list[str]:
     tokens = _keyword_tokens(keyword)
-    blob = f"{title} {url} {snippet}".lower()
-    return [token for token in tokens if token in blob]
+    blob = _fold_match_blob(title, url, snippet)
+    return [token for token in tokens if _token_matches(token, blob)]
 
 
 def _serp_item_score(keyword: str, item: Any) -> int:
@@ -1071,10 +1160,15 @@ def _order_serp_results(keyword: str, results: list[Any]) -> list[Any]:
 def _competitor_serp_queries(keyword: str) -> list[str]:
     phrase = " ".join((keyword or "").split())
     tokens = re.findall(r"[A-Za-z0-9']+", phrase)
+    skip = {"the", "and", "for", "with", "from", "how", "what", "a", "of", "to"}
+    distinctive = [token for token in tokens if token.lower() not in skip]
     queries: list[str] = []
-    if len(tokens) >= 3:
+    if len(distinctive) >= 3:
+        queries.append(" ".join(distinctive[-3:]))
+        queries.append(" ".join(distinctive[:3]))
+        queries.append(" ".join(distinctive[1:4]))
+    elif len(tokens) >= 3:
         queries.append(" ".join(tokens[-3:]))
-        queries.append('"' + " ".join(tokens[:3]) + '"')
         queries.append(" ".join(tokens[2:]))
         queries.append(" ".join(tokens[1:4]))
     if phrase:
@@ -1164,8 +1258,16 @@ def _select_competitor_rows(
     target: int = TARGET_COMPETITORS,
     needed: int = 2,
 ) -> list[dict[str, Any]]:
-    """Keep pasted URLs, then fill to `target` with the strongest SERP pages."""
-    manuals = [item["row"] for item in pending if item.get("is_manual")]
+    """Keep on-topic pasted URLs, then fill to `target` with the strongest SERP pages."""
+
+    def off_topic_manual(item: dict[str, Any]) -> bool:
+        if not item.get("is_manual"):
+            return False
+        if "topic_mismatch" in item:
+            return bool(item.get("topic_mismatch"))
+        return int(item.get("topic") or 0) < needed
+
+    manuals = [item["row"] for item in pending if item.get("is_manual") and not off_topic_manual(item)]
     rest = [item for item in pending if not item.get("is_manual")]
     rest.sort(
         key=lambda item: (int(item.get("topic") or 0), 1 if item.get("extract_ok") else 0),
@@ -1287,7 +1389,7 @@ def _clean_section_label(text: str) -> Optional[str]:
         return None
     if heading.lower().startswith(("discover ", "shop ", "buy ", "subscribe")):
         return None
-    if heading.lower().strip(" :") in _GENERIC_SECTIONS:
+    if heading.lower().strip(" :") in _GENERIC_SECTIONS or is_closing_section(heading):
         return None
     if not _looks_complete(heading):
         return None
@@ -1335,31 +1437,42 @@ def analyze_competitors(
     on_progress: ProgressFn = None,
     country: Optional[str] = None,
     language: Optional[str] = None,
-    competitor_count: Optional[int] = None,
     client_analysis_id: Optional[str] = None,
     current_origin: Optional[str] = None,
+    months: Optional[int] = None,
 ) -> dict[str, Any]:
     """
-    Live SERP competitor snapshot for ranking pages.
+    Compare your page with the competitor URLs you supply, for the keyword you enter.
+    Competitors are never discovered from live search.
     """
     analysis_id = str(uuid.uuid4())
-    submitted_keyword = (keyword or "").strip() or None
+    keyword = (keyword or "").strip() or None
+    if not keyword:
+        raise ValueError("Enter a target keyword.")
     url_check = validate_blog_url(blog_url, current_origin or "")
     if url_check["status"] == "invalid":
         raise ValueError(url_check["error"] or "Please enter a valid public article URL.")
     blog_url = url_check["url"] if url_check["ok"] else None
-    keyword = submitted_keyword
-    keyword_source = "user" if keyword else "missing"
+    keyword_source = "user"
     detected_keyword = ""
     detected_evidence: list[str] = []
     blog_url_status = url_check["status"]
     mode = analysis_mode(blog_url, keyword)
-    manual_urls = _normalize_competitor_urls(competitor_urls)
+    manual_urls = _normalize_competitor_urls(list(competitor_urls or []))
     country = re.sub(r"[^a-z]", "", (country or "us").lower())[:8] or "us"
     language = re.sub(r"[^a-z-]", "", (language or "en").lower())[:8] or "en"
-    target_n = max(3, min(10, int(competitor_count or TARGET_COMPETITORS)))
-    if not blog_url and not keyword and not manual_urls:
-        raise ValueError("Enter a blog URL, a target keyword, or competitor URLs.")
+    window = diagnosis_window(months)
+    target_n = len(manual_urls)
+    logger.info(
+        "analyze_competitors analysis_id=%s blog_url=%r keyword=%r competitor_urls=%s client_analysis_id=%s",
+        analysis_id,
+        blog_url,
+        keyword,
+        manual_urls,
+        client_analysis_id,
+    )
+    if not blog_url and not manual_urls:
+        raise ValueError("Enter a blog URL or at least one competitor URL.")
 
     your_page: Optional[dict[str, Any]] = None
     scraped_by_url: dict[str, dict[str, Any]] = {}
@@ -1372,79 +1485,34 @@ def analyze_competitors(
         blog_url_status = "extracted" if your_page.get("extract_ok") else "extract_failed"
         if not your_page.get("url"):
             your_page["url"] = blog_url
-        if not keyword:
-            detected = detect_keyword_from_article(your_page)
-            keyword = detected["keyword"]
-            detected_keyword = keyword
-            detected_evidence = detected["evidence"]
-            keyword_source = "auto_detected"
-            mode = "blog_auto_detected"
 
-    if not keyword and manual_urls:
-        seed = _scrape_url(manual_urls[0])
-        if seed:
-            scraped_by_url[manual_urls[0]] = seed
-            scraped_by_url[seed["url"]] = seed
-            detected = detect_keyword_from_article(seed)
-            keyword = detected["keyword"]
-            detected_keyword = keyword
-            detected_evidence = detected["evidence"]
-            keyword_source = "auto_detected"
-
-    if not keyword:
-        raise ValueError("Could not detect a keyword. Enter one manually.")
+    gsc_diagnosis = unavailable_diagnosis("No blog URL submitted.", days=window["days"])
+    if blog_url:
+        _emit(on_progress, "fetch_page", f"Reading Search Console ({window['label'].lower()})")
+        try:
+            gsc_diagnosis = diagnose_page_visibility(
+                blog_url,
+                days=window["days"],
+                page=your_page,
+                target_keyword=keyword,
+            )
+        except Exception as error:
+            logger.warning("GSC diagnosis skipped: %s", error)
+            gsc_diagnosis = unavailable_diagnosis(
+                str(error) or "Search Console lookup failed.",
+                blog_url,
+                days=window["days"],
+            )
+    gsc_diagnosis["period"] = {
+        **(gsc_diagnosis.get("range") or {}),
+        **(gsc_diagnosis.get("period") or {}),
+        **window,
+    }
 
     serp_query = keyword
-    serp_query_source = "user" if keyword_source == "user" else "auto_detected"
-    logger.info(
-        "Competitor SERP query=%r source=%s analysis_id=%s blog_url=%s",
-        serp_query,
-        serp_query_source,
-        analysis_id,
-        blog_url,
-    )
-
-    _emit(on_progress, "serp", "Running SERP")
-    serp = analyze_serp(serp_query, max_results=max(15, target_n + 5), country=country, language=language)
-    if not serp.results:
-        shorter = _shorten_query(serp_query)
-        if shorter != serp_query:
-            logger.info(
-                "Retrying SERP with shortened keyword %r; keeping serp_query=%r",
-                shorter,
-                serp_query,
-            )
-            extra = analyze_serp(shorter, max_results=max(15, target_n + 5), country=country, language=language)
-            if extra.results:
-                serp.results = extra.results
-    raw_serp_count = len(serp.results or [])
-    if serp.results:
-        picked = _pick_serp_results(serp_query, serp.results)
-        serp.results = picked or _order_serp_results(serp_query, serp.results)[:SERP_CANDIDATE_LIMIT]
-        serp.common_headings = extract_headings_from_snippets(serp.results)
-        serp.nlp_keywords = extract_nlp_keywords(serp_query, serp.results)
-    serp.keyword = serp_query
-    serp_warning = ""
-    if not serp.results:
-        if manual_urls:
-            logger.info("SERP empty or off-topic for '%s'; using %s manual URLs", keyword, len(manual_urls))
-        elif raw_serp_count:
-            serp_warning = (
-                "Live search did not return ranking pages that match this blog topic. "
-                "Paste competitor URLs, or try a tighter keyword."
-            )
-            logger.warning("SERP off-topic for '%s'; continuing with ranking pages", keyword)
-        elif not your_page:
-            raise ValueError(
-                "No search results found for that keyword. "
-                "Try a shorter phrase, paste the blog URL, or add competitor URLs."
-            )
-        else:
-            serp_warning = (
-                "Live search timed out, so ranking competitors could not be loaded. "
-                "Paste competitor URLs, or the page audit below still uses your URL."
-            )
-            logger.warning("SERP empty for '%s'; continuing with live-page audit", keyword)
+    serp_query_source = "user"
+    serp = SERPAnalysis(keyword=keyword)
+    serp_warning = "" if manual_urls else "No competitor URLs added, so this is an audit of your page only."
 
     _emit(on_progress, "competitors", "Analyzing competitors")
     ranked: list[Any] = []
@@ -1458,18 +1526,6 @@ def analyze_competitors(
         ranked.append(SERPResult(title="", url=url, snippet=""))
         ranked_keys.add(key)
         manual_keys.add(key)
-    for result in serp.results:
-        if blog_url and _same_site(blog_url, result.url):
-            continue
-        key = _url_key(result.url)
-        if not key[0] or key in ranked_keys:
-            continue
-        ranked.append(result)
-        ranked_keys.add(key)
-        if len(ranked) >= SERP_CANDIDATE_LIMIT:
-            break
-    if not ranked:
-        ranked = list(serp.results[:SERP_CANDIDATE_LIMIT])
 
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
@@ -1496,7 +1552,16 @@ def analyze_competitors(
         page = {**page, "full_text": page_full_text(page)}
         is_manual = _url_key(item.url) in manual_keys
         topic = _page_topic_score(keyword, page, item)
-        scores = _score_page(keyword, page)
+        topic_mismatch = bool(is_manual and topic < needed)
+        scores = (
+            {
+                "seo": None, "geo": None, "aeo": None, "aio": None, "sxo": None,
+                "overall": None, "confidence": "unavailable", "status": "unavailable",
+                "reason": "Off-topic competitor URL excluded.",
+                "reports": {}, "scores": {},
+            }
+            if topic_mismatch else _score_page(keyword, page)
+        )
         page_title = page.get("title") or item.title or ""
         if re.match(r"^https?://", str(page_title), flags=re.I):
             page_title = ""
@@ -1515,12 +1580,16 @@ def analyze_competitors(
             well_signals = _opportunity_signals(page_view)
         page_intent = classify_page_intent({**page_view, "url": item.url})
         intent_mismatch = user_intent == "informational" and page_intent in {"transactional", "navigational"}
-        if intent_mismatch:
+        if topic_mismatch:
+            does_well = ""
+            well_signals = [{"kind": "warn", "label": "Topic mismatch"}]
+        elif intent_mismatch:
             does_well = ""
             well_signals = [{"kind": "warn", "label": "Intent mismatch"}]
         pending.append({
             "is_manual": is_manual,
             "topic": topic,
+            "topic_mismatch": topic_mismatch,
             "extract_ok": bool(page.get("extract_ok")),
             "row": {
                 "url": item.url,
@@ -1531,6 +1600,7 @@ def analyze_competitors(
                 "page_title_signal": True,
                 "search_intent": page_intent,
                 "intent_mismatch": intent_mismatch,
+                "topic_mismatch": topic_mismatch,
                 "content_type": page["content_type"],
                 "authority": page["authority"],
                 "word_count": page.get("word_count"),
@@ -1565,20 +1635,25 @@ def analyze_competitors(
     for index, row in enumerate(competitors, start=1):
         row["rank"] = index
 
+    excluded_manuals = [
+        item["row"].get("url")
+        for item in pending
+        if item.get("is_manual") and item.get("topic_mismatch") and item["row"].get("url")
+    ]
+    used_manual_urls = [
+        url for url in manual_urls
+        if url not in set(excluded_manuals)
+    ]
+    if excluded_manuals:
+        excluded_note = (
+            "One or more competitor URLs you provided don't appear to match the "
+            f"target keyword '{keyword}' and were excluded: "
+            + ", ".join(excluded_manuals)
+        )
+        serp_warning = f"{serp_warning} {excluded_note}".strip() if serp_warning else excluded_note
+
     if ranked and not competitors and not serp_warning:
-        serp_warning = (
-            "Live search did not return ranking pages that match this blog topic. "
-            "Paste competitor URLs, or try a tighter keyword."
-        )
-    elif (
-        not manual_urls
-        and 0 < len(competitors) < target_n
-        and not serp_warning
-    ):
-        serp_warning = (
-            f"Live search found {len(competitors)} ranking page(s). "
-            "Add competitor URLs if you want a fuller set."
-        )
+        serp_warning = "None of the competitor URLs you added could be analyzed."
 
     if your_page:
         blob = page_full_text(your_page)
@@ -1622,10 +1697,22 @@ def analyze_competitors(
         source_title = your_page.get("h1") or your_page.get("title") or ""
 
     _emit(on_progress, "report", "Building report")
-    keyword_report = compare_keywords(keyword, your_page, competitors)
+    keyword_report = compare_keywords(
+        keyword,
+        your_page,
+        competitors,
+        serp_phrases=list(serp.nlp_keywords or []),
+    )
     keyword_report["status"] = "ok" if keyword_report.get("table") else "unavailable"
     if not keyword_report.get("table"):
         keyword_report["reason"] = missing_blog_reason or "No overlapping phrases were extracted from the available headings."
+    keyword_report["focus"] = keyword_focus(
+        keyword,
+        keyword_report.get("table") or [],
+        gsc_diagnosis,
+        competitor_total=sum(1 for row in competitors if not row.get("intent_mismatch")),
+        country=country,
+    )
     gap_report = content_gaps(your_page, competitors, keyword)
     gap_report["status"] = "ok"
     if not gap_report.get("recommended_outline"):
@@ -1641,6 +1728,7 @@ def analyze_competitors(
     readability = analyze_readability(full_text, language)
     human = humanization_report(full_text)
     original = originality_report({**(your_page or {}), "text": full_text}, competitors)
+    image_report = image_alt_report(your_page, competitors, keyword)
 
     avg_scores = average_competitor_scores(competitors)
     diffs = {}
@@ -1652,7 +1740,22 @@ def analyze_competitors(
         else:
             diffs[key] = None
     traffic = traffic_reasons(your_page, competitors, your_scores, avg_scores)
-    plan = action_plan(your_page, your_scores, keyword_report, gap_report, readability)
+    plan = merge_gsc_actions(
+        action_plan(your_page, your_scores, keyword_report, gap_report, readability, image_report),
+        gsc_diagnosis,
+    )
+    targeting = gsc_diagnosis.get("keyword_targeting") or {}
+    keyword_mismatch = None
+    if targeting.get("mismatch") and targeting.get("primary_ranking_query"):
+        keyword_mismatch = {
+            "target_keyword": keyword,
+            "search_console_query": targeting["primary_ranking_query"],
+        }
+        for item in plan:
+            if item.get("category") in {"Keyword", "Content"}:
+                item["depends_on_keyword"] = True
+        keyword_report["depends_on_keyword"] = True
+        gap_report["depends_on_keyword"] = True
     if not plan:
         plan_payload = {"items": [], "status": "unavailable", "reason": missing_blog_reason or "No prioritized actions were generated."}
     else:
@@ -1671,6 +1774,7 @@ def analyze_competitors(
             "page_title_signal": True,
             "search_intent": row.get("search_intent") or "informational",
             "intent_mismatch": bool(row.get("intent_mismatch")),
+            "topic_mismatch": bool(row.get("topic_mismatch")),
             "meta_description": row.get("meta_description") or UNAVAILABLE,
             "content_type": row.get("content_type"),
             "authority": row.get("authority"),
@@ -1702,6 +1806,15 @@ def analyze_competitors(
     serp_insights = []
     if user_intent == "informational" and any(row.get("intent_mismatch") for row in slim_competitors):
         serp_insights.append("This query contains mixed intent; shopping pages also appear.")
+    word_vals = [int(row.get("word_count") or 0) for row in competitors if int(row.get("word_count") or 0) > 0]
+    competitor_avg_words = (sum(word_vals) / len(word_vals)) if word_vals else None
+    diagnosis_summary = build_diagnosis_summary(
+        gsc_diagnosis,
+        target_keyword=keyword or "",
+        page=your_page,
+        content_gaps=gap_report,
+        competitor_avg_words=competitor_avg_words,
+    )
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()][:40]
     your_page_out = None
     if your_page:
@@ -1726,7 +1839,7 @@ def analyze_competitors(
             "external_links": your_page.get("external_links") if isinstance(your_page.get("external_links"), list) else [],
             "internal_link_count": your_page.get("internal_links") if isinstance(your_page.get("internal_links"), int) else 0,
             "external_link_count": your_page.get("external_links") if isinstance(your_page.get("external_links"), int) else 0,
-            "images": [],
+            "images": your_page.get("images") or [],
             "primary_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "primary"][:8],
             "secondary_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "secondary"][:12],
             "long_tail_keywords": [row["keyword"] for row in (keyword_report.get("table") or []) if row.get("type") == "long-tail"][:12],
@@ -1752,7 +1865,8 @@ def analyze_competitors(
         "country": country,
         "language": language,
         "competitor_count": target_n,
-        "competitor_urls": manual_urls,
+        "competitor_urls": used_manual_urls,
+        "excluded_competitor_urls": excluded_manuals,
         "analyzed_at": analyzed_at,
         "your_page": your_page_out,
         "source_article": source_article,
@@ -1766,14 +1880,19 @@ def analyze_competitors(
         "competitors": slim_competitors,
         "keywords": keyword_report,
         "keyword_gaps": keyword_report,
+        "keyword_mismatch": keyword_mismatch,
         "content_gaps": gap_report,
         "citations": citations,
         "traffic": traffic,
         "readability": readability,
         "humanization": human,
         "originality": original,
+        "images": image_report,
         "action_plan": plan,
         "action_plan_report": plan_payload,
+        "gsc_diagnosis": gsc_diagnosis,
+        "diagnosis_window": window,
+        "diagnosis_summary": diagnosis_summary,
         "serp_warning": serp_warning,
         "serp_insights": serp_insights,
         "article_intent": user_intent,
@@ -1784,12 +1903,16 @@ def analyze_competitors(
             "nlp_keywords": (serp.nlp_keywords or [])[:12],
         },
         "unavailable_metrics": [
-            "search volume",
-            "keyword difficulty",
-            "domain authority",
-            "backlinks",
-            "referring domains",
-            "Core Web Vitals",
-            "verified traffic",
+            metric
+            for metric in (
+                "search volume",
+                "keyword difficulty",
+                "domain authority",
+                "backlinks",
+                "referring domains",
+                "Core Web Vitals",
+                "verified traffic",
+            )
+            if metric != "verified traffic" or gsc_diagnosis.get("status") != "ok"
         ],
     }

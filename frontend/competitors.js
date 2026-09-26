@@ -1,7 +1,7 @@
 (function () {
   const SNAPSHOT_KEY = "ba-competitor-snapshots";
   const HANDOFF_KEY = "ba-competitor-handoff";
-  const STAGES = ["fetch_page", "serp", "competitors", "scoring", "report"];
+  const STAGES = ["fetch_page", "competitors", "scoring", "report"];
 
   const MAX_COMPETITOR_URLS = 10;
   const URL_PLACEHOLDERS = [
@@ -35,11 +35,10 @@
   const dashBody = document.getElementById("ca-dash-body");
   const countryEl = document.getElementById("ca-country");
   const languageEl = document.getElementById("ca-language");
-  const countEl = document.getElementById("ca-count");
+  const monthsEl = document.getElementById("ca-months");
 
   let currentResult = null;
   let analysisSeq = 0;
-  let keywordTouched = false;
   const INVALID_BLOG_URL_MESSAGE = "Please enter a valid public article URL. The current value is the local Competitor Analysis page, not an article URL.";
 
   function inspectBlogUrl(value) {
@@ -173,8 +172,7 @@
     });
     const filled = inputs.filter((input) => looksLikeUrl(input.value)).length;
     if (urlMetaEl) {
-      urlMetaEl.textContent = filled + " of " + MAX_COMPETITOR_URLS + " added · optional"
-        + (filled ? "" : " · auto-finds 5 if empty");
+      urlMetaEl.textContent = filled + " of " + MAX_COMPETITOR_URLS + " added";
     }
     if (urlAddBtn) {
       urlAddBtn.hidden = inputs.length >= MAX_COMPETITOR_URLS;
@@ -281,14 +279,11 @@
   function renderCompetitors(result) {
     const rows = result?.competitors || [];
     const keyword = result?.serp_query || result?.target_keyword || "your target keyword";
-    const autoFound = !(result?.competitor_urls || []).length;
-    compSub.textContent = autoFound
-      ? `${rows.length} ranking page${rows.length === 1 ? "" : "s"} for ${keyword}`
-      : `Top pages for ${keyword}`;
+    compSub.textContent = `${rows.length} competitor URL${rows.length === 1 ? "" : "s"} for ${keyword}`;
     if (!rows.length) {
       const note = result?.serp_warning
         ? escapeHtml(result.serp_warning)
-        : "Run an analysis to see ranking competitors here";
+        : "Add competitor URLs and run an analysis to compare them here";
       tableEl.innerHTML = `<div class="ca-empty">${note}</div>`;
       return;
     }
@@ -435,9 +430,14 @@
     }
     const blogUrl = blogCheck.ok ? blogCheck.url : null;
     const keyword = keywordInput.value.trim() || null;
-    const competitorUrls = collectCompetitorUrls();
-    if (!blogUrl && !keyword && !competitorUrls.length) {
-      showError("Enter a blog URL, a target keyword, or competitor URLs.");
+    const competitorUrls = collectCompetitorUrls().slice();
+    if (!keyword) {
+      showError("Enter a target keyword.");
+      keywordInput.focus();
+      return;
+    }
+    if (!blogUrl && !competitorUrls.length) {
+      showError("Enter a blog URL or at least one competitor URL.");
       return;
     }
     const analysisId = String(++analysisSeq);
@@ -449,7 +449,7 @@
     tableEl.innerHTML = skeletonRows();
     if (yoursEl) yoursEl.hidden = true;
     if (dashEl) dashEl.hidden = true;
-    ["ca-filter-priority", "ca-filter-kwtype", "ca-filter-intent"].forEach((id) => {
+    ["ca-filter-priority"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.value = "";
     });
@@ -457,10 +457,10 @@
     const payload = {
       blog_url: blogUrl,
       keyword,
-      competitor_urls: competitorUrls,
+      competitor_urls: competitorUrls.slice(),
       country: countryEl?.value || "us",
       language: languageEl?.value || "en",
-      competitor_count: Number(countEl?.value || 5),
+      months: Number(monthsEl?.value || 6),
       client_analysis_id: analysisId,
     };
     console.log("[Competitor Analysis] request", payload);
@@ -497,7 +497,7 @@
       applyResult(result);
       saveSnapshot(result);
     } catch (err) {
-      tableEl.innerHTML = `<div class="ca-empty">Run an analysis to see ranking competitors here</div>`;
+      tableEl.innerHTML = `<div class="ca-empty">Add competitor URLs and run an analysis to compare them here</div>`;
       if (yoursEl) yoursEl.hidden = true;
       if (dashEl) dashEl.hidden = true;
       showError(err.message || "Analysis failed");
@@ -521,7 +521,6 @@
   setCompetitorUrls([]);
 
   analyzeBtn?.addEventListener("click", runAnalysis);
-  keywordInput?.addEventListener("input", () => { keywordTouched = true; });
   [blogUrlInput, keywordInput].forEach((input) => {
     input?.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -568,29 +567,6 @@
     return value == null ? "—" : value;
   }
 
-  function radarSvg(yours, avg) {
-    const keys = ["seo", "geo", "aeo", "aio", "sxo"];
-    const cx = 90, cy = 90, r = 68;
-    const pts = (obj) => keys.map((key, i) => {
-      const angle = (-Math.PI / 2) + (i * 2 * Math.PI / keys.length);
-      const val = Math.max(0, Math.min(100, Number(obj?.[key]) || 0)) / 100;
-      return [cx + Math.cos(angle) * r * val, cy + Math.sin(angle) * r * val];
-    });
-    const poly = (pairs) => pairs.map((p) => p.join(",")).join(" ");
-    const axis = keys.map((key, i) => {
-      const angle = (-Math.PI / 2) + (i * 2 * Math.PI / keys.length);
-      const x = cx + Math.cos(angle) * r;
-      const y = cy + Math.sin(angle) * r;
-      const lx = cx + Math.cos(angle) * (r + 14);
-      const ly = cy + Math.sin(angle) * (r + 14);
-      return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#ddd"/><text x="${lx}" y="${ly}" font-size="10" text-anchor="middle">${key.toUpperCase()}</text>`;
-    }).join("");
-    return `<svg viewBox="0 0 180 180" width="180" height="180" class="ca-radar">${axis}
-      <polygon points="${poly(pts(avg))}" fill="rgba(91,62,240,.12)" stroke="#5b3ef0"/>
-      <polygon points="${poly(pts(yours))}" fill="rgba(21,122,75,.18)" stroke="#157a4b"/>
-    </svg>`;
-  }
-
   function tableRows(headers, rows) {
     if (!rows.length) return `<p class="ca-empty">No rows for this filter.</p>`;
     return `<div class="ca-scroll"><table class="ca-grid-table"><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
@@ -601,15 +577,6 @@
     const raw = result?.your_page?.url || result?.blog_url || "";
     const check = inspectBlogUrl(raw);
     return check.ok ? check.url : "";
-  }
-
-  function factorMessage(result) {
-    const status = result.blog_url_status;
-    if (status === "missing" || result.analysis_mode === "keyword_only") return "No blog URL submitted.";
-    if (status === "invalid") return result.blog_url_error || INVALID_BLOG_URL_MESSAGE;
-    if (status === "fetch_failed") return "The page could not be fetched.";
-    if (status === "extract_failed" || result.source_extract_error) return "Article text could not be extracted.";
-    return "Score factors unavailable.";
   }
 
   function headingList(value) {
@@ -629,69 +596,64 @@
     return heads.filter((item) => item.toLowerCase() !== title);
   }
 
-  function looksLikeKeyword(phrase) {
-    const text = String(phrase || "").trim();
-    const words = text.split(/\s+/).filter(Boolean);
-    if (words.length < 2 || words.length > 7) return false;
-    if (/[|]/.test(text) || / – | — /.test(text)) return false;
-    if (/\b(buy|shop|online|amazon|bewakoof|crazymonk|flipkart)\b/i.test(text)) return false;
-    if (/\.(com|in|net|org)\b/i.test(text)) return false;
-    return true;
+  function keywordFocus(result) {
+    const focus = result.keywords?.focus || {};
+    return {
+      ours: focus.our_blog || [],
+      oursBasis: focus.our_blog_basis || "on_page",
+      competitors: focus.competitors || [],
+      opportunities: focus.opportunities || [],
+      note: focus.note || "",
+    };
   }
 
-  function blogStatusLabel(row) {
-    const status = row.my_blog_status || (row.found_in_my_blog ? "exact" : "missing");
-    if (status === "exact") return "Exact match";
-    if (status === "close_variant") return "Close variant";
-    return "Not found";
+  function keywordChoicePending(result) {
+    return !!(result.keyword_mismatch && !result.keyword_mismatch.confirmed);
   }
 
-  function deriveKeywordRows(result) {
-    const direct = result.keywords?.table || result.keyword_gaps?.table || result.keyword_gaps?.items;
-    if (Array.isArray(result.keywords) && result.keywords.length && result.keywords[0]?.keyword) {
-      return result.keywords.filter((row) => looksLikeKeyword(row.keyword) || row.type === "primary");
-    }
-    if (Array.isArray(direct) && direct.length) {
-      return direct.filter((row) => looksLikeKeyword(row.keyword) || row.type === "primary");
-    }
-    const keyword = String(result.serp_query || result.target_keyword || "").trim();
-    const mineHeads = pageHeadings(result.your_page, false);
-    const mineBlob = (mineHeads.join(" ") + " " + (result.your_page?.full_text || "")).toLowerCase();
-    const rows = [];
-    const seen = new Set();
-    function add(phrase, type, inMine, inComp, status) {
-      const key = String(phrase || "").toLowerCase().trim();
-      if (!key || seen.has(key) || (!looksLikeKeyword(phrase) && type !== "primary")) return;
-      seen.add(key);
-      rows.push({
-        keyword: phrase,
-        type,
-        found_in_my_blog: status !== "missing",
-        found_in_competitor: !!inComp,
-        my_blog_status: status || (inMine ? "close_variant" : "missing"),
-        search_intent: /\?/.test(phrase) ? "informational" : "informational",
-        opportunity: !inMine && inComp ? "high" : (inMine && inComp ? "monitor" : "differentiate"),
-        recommendation: !inMine && inComp
-          ? "Cover this subtopic in a natural H2; do not force exact-match stuffing."
-          : "Keep natural coverage; make the answer specific.",
-      });
-    }
-    if (keyword) {
-      const present = mineBlob.includes(keyword.toLowerCase()) || mineHeads.some((h) => h.toLowerCase().includes("hoodie") && keyword.toLowerCase().includes("hoodie"));
-      add(keyword, "primary", present, false, present ? "close_variant" : "missing");
-    }
-    (result.serp?.nlp_keywords || []).forEach((phrase) => {
-      if (!looksLikeKeyword(phrase)) return;
-      add(phrase, "secondary", mineBlob.includes(String(phrase).toLowerCase()), true, mineBlob.includes(String(phrase).toLowerCase()) ? "close_variant" : "missing");
-    });
-    (result.competitors || []).forEach((row) => {
-      if (row.intent_mismatch) return;
-      pageHeadings(row, false).forEach((heading) => {
-        if (!looksLikeKeyword(heading)) return;
-        add(heading, heading.split(/\s+/).length >= 4 ? "long-tail" : "secondary", mineHeads.some((mine) => mine.toLowerCase() === heading.toLowerCase()), true);
-      });
-    });
-    return rows;
+  function dependsTag(show) {
+    return show ? ` <span class="ca-tag ca-tag-warn">Depends on keyword choice</span>` : "";
+  }
+
+  function focusGroup(title, subtitle, rows, emptyText, showVolume, tag = "") {
+    const headers = showVolume ? ["Keyword", "Why", "Search volume"] : ["Keyword", "Why"];
+    const body = rows.length
+      ? tableRows(headers, rows.map((k) => {
+        const cells = [escapeHtml(k.keyword), escapeHtml(k.evidence || "")];
+        if (showVolume) cells.push(escapeHtml(String(k.search_volume ?? "Data unavailable")));
+        return cells;
+      }))
+      : `<p class="ca-empty">${escapeHtml(emptyText)}</p>`;
+    return `<h4>${escapeHtml(title)}${tag}</h4><p class="ca-hint">${escapeHtml(subtitle)}</p>${body}`;
+  }
+
+  function renderKeywordFocus(result) {
+    const f = keywordFocus(result);
+    const tag = dependsTag(keywordChoicePending(result));
+    return `
+      ${focusGroup(
+        "Performing well for your blog",
+        f.oursBasis === "search_console" ? "Top page-one Search Console queries by clicks" : "No Search Console data: ranked by how strongly your page uses them, not by traffic",
+        f.ours,
+        result.your_page ? "No strong keywords found on your page." : "Add a blog URL to see your keywords.",
+        false,
+      )}
+      ${focusGroup(
+        "Performing well for competitors",
+        "Used by the most competitor pages you added",
+        f.competitors,
+        (result.competitors || []).length ? "No shared competitor keywords found." : "Add competitor URLs to see their keywords.",
+        false,
+        tag,
+      )}
+      ${focusGroup(
+        "High-potential keywords to target (Recommendation)",
+        f.note || "Ranked by search volume",
+        f.opportunities,
+        "No relevant keyword opportunities found.",
+        true,
+        tag,
+      )}`;
   }
 
   function deriveContentGaps(result) {
@@ -880,37 +842,6 @@
     };
   }
 
-  function renderFactors(yours, result) {
-    const reports = yours.reports || yours.scores || result.scores || {};
-    const keys = ["seo", "geo", "aeo", "aio", "sxo"];
-    const blocks = keys.map((key) => {
-      const report = reports[key];
-      if (!report || typeof report !== "object") return "";
-      const factors = report.factors || [];
-      if (report.status === "unavailable" && !factors.length) {
-        return `<details class="ca-factors"><summary>${escapeHtml(key.toUpperCase())} Data unavailable</summary><p class="ca-hint">${escapeHtml(report.reason || "Data unavailable")}</p></details>`;
-      }
-      if (!factors.length && report.score == null && yours[key] == null) return "";
-      const score = report.score != null ? report.score : yours[key];
-      if (!factors.length) {
-        return `<details class="ca-factors" open><summary>${escapeHtml(key.toUpperCase())} ${scoreNum(score)}</summary>
-          <div class="ca-factor"><strong>On-page checklist</strong> ${scoreNum(score)}/100<span> Factor weights were not included in this response. The score still reflects the ${key.toUpperCase()} checklist.</span></div>
-        </details>`;
-      }
-      return `<details class="ca-factors" open><summary>${escapeHtml(key.toUpperCase())} ${scoreNum(score)} · ${escapeHtml(report.grade || report.status || "")} · ${escapeHtml(report.summary || "")}</summary>
-        ${factors.map((f) => `<div class="ca-factor"><strong>${escapeHtml(f.name)}</strong> ${f.status === "unavailable" ? "unavailable" : `${f.score}/${f.max}`}<span> ${escapeHtml(f.note || "")}</span>${f.tip ? `<em>${escapeHtml(f.tip)}</em>` : ""}</div>`).join("")}
-      </details>`;
-    }).filter(Boolean).join("");
-    if (blocks) return blocks;
-    const numeric = keys.filter((key) => numericScore(yours[key]) != null);
-    if (numeric.length) {
-      return numeric.map((key) => `<details class="ca-factors" open><summary>${escapeHtml(key.toUpperCase())} ${scoreNum(yours[key])}</summary>
-        <div class="ca-factor"><strong>Overall ${key.toUpperCase()}</strong> ${scoreNum(yours[key])}/100<span> This is the published on-page score for your article.</span></div>
-      </details>`).join("");
-    }
-    return `<p class="ca-empty">${escapeHtml(factorMessage(result))}</p>`;
-  }
-
   function sectionNote(report, fallback) {
     if (report?.reason && (!(report.table || []).length && !(report.items || []).length)) {
       return `<p class="ca-empty">${escapeHtml(report.reason)}</p>`;
@@ -959,6 +890,143 @@
     yoursEl.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function metricLabel(value, suffix) {
+    if (value == null || value === "") return "Data unavailable";
+    return suffix ? String(value) + suffix : String(value);
+  }
+
+  function deltaLabel(value) {
+    if (value == null || value === "") return "Data unavailable";
+    const n = Number(value);
+    if (Number.isNaN(n)) return "Data unavailable";
+    return `${n > 0 ? "+" : ""}${n}%`;
+  }
+
+  function lossKindLabel(kind) {
+    return ({
+      vanished: "No longer showing",
+      position_fell: "Rank dropped",
+      ctr_fell: "CTR dropped",
+      demand_down: "Fewer impressions (rank similar)",
+    })[kind] || kind || "";
+  }
+
+  function renderComparisons(gsc) {
+    const c = gsc.comparisons;
+    if (!c) return "";
+    function card(row) {
+      if (!row) return "";
+      const dates = [row.start, row.end].filter(Boolean).join(" – ");
+      if (row.status !== "ok") {
+        return `<article><p class="ca-kicker">${escapeHtml(row.label || "")}</p><p class="ca-empty">${escapeHtml(row.reason || "Data unavailable")}</p></article>`;
+      }
+      const ctr = row.ctr == null ? "Data unavailable" : `${Math.round(Number(row.ctr) * 1000) / 10}%`;
+      const change = row.impressions_delta_pct == null ? "" : ` · vs this period ${escapeHtml(deltaLabel(row.impressions_delta_pct))}`;
+      return `<article>
+        <p class="ca-kicker">${escapeHtml(row.label || "")}${dates ? ` · ${escapeHtml(dates)}` : ""}</p>
+        <p>Clicks ${escapeHtml(metricLabel(row.clicks))} · Impressions ${escapeHtml(metricLabel(row.impressions))}${change}</p>
+        <p>CTR ${escapeHtml(ctr)} · Avg position ${escapeHtml(metricLabel(row.position))}</p>
+      </article>`;
+    }
+    return `<div class="ca-compare">${card(c.current)}${card(c.previous)}${card(c.year_ago)}</div>`;
+  }
+
+  function renderQueryLosses(gsc) {
+    const report = gsc.query_losses;
+    if (!report) return "";
+    if (report.status !== "ok") {
+      return `<h4>Queries that lost visibility</h4><p class="ca-empty">${escapeHtml(report.reason || "Data unavailable")}</p>`;
+    }
+    if (!(report.items || []).length) {
+      return `<h4>Queries that lost visibility</h4><p class="ca-empty">No query losses in this window.</p>`;
+    }
+    return `<h4>Queries that lost visibility</h4>
+      ${tableRows(["Query", "This period", "Previous", "Change", "What changed"], report.items.map((row) => [
+        escapeHtml(row.query),
+        escapeHtml(String(row.impressions ?? "")),
+        escapeHtml(String(row.previous_impressions ?? "")),
+        escapeHtml(String(row.impressions_delta ?? "")),
+        escapeHtml(lossKindLabel(row.kind)),
+      ]))}
+      <p class="ca-hint">Compared with the equal-length period before the range you chose. Numbers are Search Console counts, not estimates.</p>`;
+  }
+
+  function renderDiagnosis(result) {
+    const summary = result.diagnosis_summary || {};
+    const gsc = result.gsc_diagnosis || {};
+    const targeting = gsc.keyword_targeting || {};
+    const parts = [];
+    if (summary.text) {
+      parts.push(`<article class="ca-diagnosis ca-diagnosis-${escapeHtml(summary.confidence || "medium")}">
+        <p class="ca-kicker">Most likely traffic reason · ${escapeHtml(summary.confidence || "medium")} confidence</p>
+        <p>${escapeHtml(summary.text)}</p>
+      </article>`);
+    }
+    const mismatch = result.keyword_mismatch;
+    if (mismatch && !mismatch.confirmed) {
+      parts.push(`<article class="ca-mismatch">
+        <p><strong>Choose your target keyword first.</strong> Your traffic mostly comes from “${escapeHtml(mismatch.search_console_query)}”, but this report was measured against “${escapeHtml(mismatch.target_keyword)}”. Keyword and content-gap items marked <span class="ca-tag ca-tag-warn">Depends on keyword choice</span> may target the wrong keyword.</p>
+        <div class="ca-mismatch-actions">
+          <button type="button" class="ca-export-btn" data-mismatch="rerun">Re-run with “${escapeHtml(mismatch.search_console_query)}”</button>
+          <button type="button" class="ca-export-btn" data-mismatch="keep">Keep “${escapeHtml(mismatch.target_keyword)}”</button>
+        </div>
+      </article>`);
+    } else if (mismatch) {
+      parts.push(`<p class="ca-hint">Target confirmed: “${escapeHtml(mismatch.target_keyword)}” (Search Console’s top query is “${escapeHtml(mismatch.search_console_query)}”).</p>`);
+    } else if (targeting.mismatch && targeting.primary_ranking_query) {
+      parts.push(`<p class="ca-serp-insight"><strong>Keyword mismatch.</strong> Search Console’s strongest query is “${escapeHtml(targeting.primary_ranking_query)}”; this analysis scored on-page placement against “${escapeHtml(targeting.target_keyword || result.serp_query || "")}”.</p>`);
+    }
+    const period = result.diagnosis_window || gsc.period || {};
+    const periodLabel = period.label || (period.months ? `Last ${period.months} month${period.months === 1 ? "" : "s"}` : "");
+    if (gsc.status === "ok") {
+      const ctr = gsc.ctr == null ? "Data unavailable" : (Math.round(Number(gsc.ctr) * 1000) / 10) + "%";
+      const dates = [period.start, period.end].filter(Boolean).join(" – ");
+      parts.push(`<div class="ca-gsc-metrics">
+        <span>${escapeHtml(periodLabel || "Search Console")}${dates ? ` · ${escapeHtml(dates)}` : ""}</span>
+        <span>Clicks ${escapeHtml(metricLabel(gsc.clicks))}</span>
+        <span>Impressions ${escapeHtml(metricLabel(gsc.impressions))}</span>
+        <span>CTR ${escapeHtml(ctr)}</span>
+        <span>Avg position ${escapeHtml(metricLabel(gsc.position))}</span>
+      </div>`);
+      parts.push(renderComparisons(gsc));
+      parts.push(renderQueryLosses(gsc));
+    } else if (gsc.reason) {
+      parts.push(`<p class="ca-hint">Search Console${periodLabel ? ` (${escapeHtml(periodLabel)})` : ""}: ${escapeHtml(gsc.reason)}</p>`);
+    }
+    return parts.join("");
+  }
+
+  function renderImages(report) {
+    if (!report || report.status !== "ok") {
+      return `<p class="ca-empty">${escapeHtml(report?.reason || "Image audit unavailable.")}</p>`;
+    }
+    const s = report.summary || {};
+    const comp = report.competitors;
+    const parts = [`<p>${s.total || 0} article image${s.total === 1 ? "" : "s"} · ${s.ok || 0} with good alt text${s.decorative ? ` · ${s.decorative} decorative` : ""}${comp ? ` · competitors average ${comp.avg_images} image${comp.avg_images === 1 ? "" : "s"}${comp.avg_descriptive_pct != null ? `, ${comp.avg_descriptive_pct}% with descriptive alt` : ""}` : ""}</p>`];
+    const recs = report.recommendations || [];
+    if (recs.length) {
+      parts.push(`<p class="ca-kicker">Recommendation</p><ul>${recs.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>`);
+    }
+    const items = report.items || [];
+    if (items.length) {
+      parts.push(tableRows(["Image", "Section", "Current alt", "Issue", "Suggested alt"], items.map((i) => [
+        /^https?:\/\//i.test(i.src || "")
+          ? `<a href="${escapeHtml(i.src)}" target="_blank" rel="noopener">${escapeHtml(i.filename || "image")}</a>`
+          : escapeHtml(i.filename || "image"),
+        escapeHtml(i.section || "—"),
+        i.alt ? escapeHtml(i.alt) : `<span class="ca-empty">none</span>`,
+        `<span class="ca-tag ${i.severity === "high" ? "ca-tag-warn" : ""}">${escapeHtml(i.issue)}</span>`,
+        i.suggested_alt
+          ? `${escapeHtml(i.suggested_alt)}<br><span class="ca-hint">Draft from ${escapeHtml(i.suggestion_basis || "alt")}</span>`
+          : `<span class="ca-hint">Describe what the image shows</span>`,
+      ])));
+      parts.push(`<p class="ca-hint">${escapeHtml(report.note || "")}</p>`);
+    } else if (s.total) {
+      parts.push(`<p class="ca-empty">No alt-text issues found.</p>`);
+    }
+    return parts.join("");
+  }
+
   function renderDashboard(result) {
     if (!dashEl || !dashBody) return;
     if (!result) {
@@ -967,30 +1035,19 @@
     }
     dashEl.hidden = false;
     const yours = result.your_scores || result.old_scores || {};
-    const avg = competitorAverages(result);
-    const diffs = result.score_diffs || {};
-    const yoursPage = result.your_page;
     const pri = document.getElementById("ca-filter-priority")?.value || "";
-    const kwtype = document.getElementById("ca-filter-kwtype")?.value || "";
-    const intent = document.getElementById("ca-filter-intent")?.value || "";
     let plan = Array.isArray(result.action_plan) ? result.action_plan : (result.action_plan_report?.items || []);
     if (pri) plan = plan.filter((p) => p.priority === pri);
-    let kwRows = deriveKeywordRows(result);
-    if (kwtype) kwRows = kwRows.filter((k) => k.type === kwtype);
-    if (intent) kwRows = kwRows.filter((k) => k.search_intent === intent);
+    const focus = keywordFocus(result);
+    const pending = keywordChoicePending(result);
     const gaps = deriveContentGaps(result);
     const citations = deriveCitations(result);
     const traffic = deriveTraffic(result);
     const readability = deriveReadability(result);
-    const href = publicArticleHref(result);
     const insights = result.serp_insights || [];
-    function outlineText(value) {
-      if (Array.isArray(value)) return value.join("; ");
-      return String(value || "");
-    }
     console.log("[Competitor Analysis] dashboard sections", {
       factors: Object.keys(yours.reports || yours.scores || {}),
-      keywords: kwRows.length,
+      keywords: focus.ours.length + focus.competitors.length + focus.opportunities.length,
       gaps: (gaps.table || []).length,
       outline: (gaps.recommended_outline || []).length,
       citations: citations.length,
@@ -999,52 +1056,25 @@
     });
 
     dashBody.innerHTML = `
+      ${renderDiagnosis(result)}
       ${insights.map((item) => `<p class="ca-serp-insight">${escapeHtml(item)}</p>`).join("")}
       <p class="ca-hint">Mode ${escapeHtml(result.analysis_mode || "")} · blog ${escapeHtml(result.blog_url_status || "")} · keyword source ${escapeHtml(result.target_keyword_source || "")} · query ${escapeHtml(result.serp_query || "")}</p>
-      <div class="ca-overview">
-        <article><h3>My blog</h3>
-          <p>${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(yoursPage?.title || href)}</a>` : escapeHtml(yoursPage?.title || factorMessage(result))}</p>
-          <p class="ca-meta">${escapeHtml(formatWords(yoursPage?.word_count))} · H2 ${yoursPage?.h2_count ?? "—"} · Author ${escapeHtml(yoursPage?.author || "Data unavailable")}</p>
-        </article>
-        <article><h3>Scores vs average competitor</h3>
-          ${radarSvg(yours, avg)}
-          <p class="ca-legend"><span class="you">You</span> <span class="avg">Avg competitor</span></p>
-          <p class="ca-hint">${escapeHtml(avg.sample_note || "")}</p>
-        </article>
-        <article><h3>Difference</h3>
-          <ul class="ca-diff">${["seo","geo","aeo","aio","sxo","overall"].map((k) => {
-            const d = diffs[k];
-            const avgVal = avg[k];
-            const label = d == null ? (avgVal == null ? (avg.reasons?.[k] || "Data unavailable") : "Data unavailable") : (d > 0 ? "+" + d : String(d));
-            return `<li><strong>${k.toUpperCase()}</strong> you ${scoreNum(yours[k])} · avg ${scoreNum(avgVal)} · ${escapeHtml(label)}</li>`;
-          }).join("")}</ul>
-        </article>
-      </div>
-      <h3>Score breakdown (your page)</h3>
-      ${renderFactors(yours, result)}
       <h3>Keyword comparison</h3>
-      ${kwRows.length ? tableRows(["Keyword","Type","My blog","Competitor","Intent","Opportunity","Recommendation"],
-        kwRows.slice(0, 30).map((k) => [
-          escapeHtml(k.keyword), escapeHtml(k.type), blogStatusLabel(k),
-          k.found_in_competitor ? "Yes" : "No", escapeHtml(k.search_intent || k.intent || "informational"),
-          escapeHtml(k.opportunity || ""), escapeHtml(k.recommended_action || k.recommendation || "")
-        ])) : `<p class="ca-empty">${escapeHtml(result.keywords?.reason || "No keyword phrases were extracted from the current article or competitor headings.")}</p>`}
-      <p class="ca-hint">${escapeHtml(result.keywords?.disclaimer || "")}</p>
-      <h3>Content gaps</h3>
-      ${(gaps.table || []).length ? tableRows(["Missing topic","Covered by","Importance","Intent","Recommended heading","Outline"],
+      ${renderKeywordFocus(result)}
+      <h3>Content gaps${dependsTag(pending)}</h3>
+      ${(gaps.table || []).length ? tableRows(["Missing topic","Covered by","Importance","Intent"],
         (gaps.table || []).map((g) => [
           escapeHtml(g.missing_topic), escapeHtml(g.covered_by), escapeHtml(g.importance),
-          escapeHtml(g.search_intent || g.intent || ""), escapeHtml(g.recommended_heading), escapeHtml(outlineText(g.suggested_outline))
+          escapeHtml(g.search_intent || g.intent || "")
         ])) : `<p class="ca-empty">${escapeHtml(gaps.reason || result.content_gaps?.reason || "No missing competitor headings were found.")}</p>`}
-      <h3>Recommended outline</h3>
-      ${(gaps.recommended_outline || []).length ? `<ol>${(gaps.recommended_outline || []).map((h) => `<li>${escapeHtml(h)}</li>`).join("")}</ol>` : `<p class="ca-empty">No outline yet.</p>`}
       <h3>AI citation opportunities</h3>
-      ${citations.length ? tableRows(["Question","Status","Format","Location","Potential","Evidence"],
+      ${citations.length ? tableRows(["Question","Status","Format","Location","Evidence"],
         citations.map((c) => [
           escapeHtml(c.keyword_or_question), escapeHtml(c.status), escapeHtml(c.format),
-          escapeHtml(c.location), String(c.citation_potential), escapeHtml(c.required_evidence)
+          escapeHtml(c.location), escapeHtml(c.required_evidence)
         ])) : `<p class="ca-empty">${escapeHtml(result.citations?.reason || "No citation opportunities yet.")}</p>`}
-      <p class="ca-hint">${escapeHtml(result.citations?.disclaimer || "Citation potential is an on-page readiness estimate, not a prediction that AI search will cite the page.")}</p>
+      <h3>Images &amp; alt text</h3>
+      ${renderImages(result.images)}
       <h3>Why competitors may outperform</h3>
       ${traffic.length ? traffic.map((r) => `<article class="ca-reason"><strong>${escapeHtml(r.reason)}</strong> · ${escapeHtml(r.severity)}<p>${escapeHtml(r.evidence)}</p><p>Fix: ${escapeHtml(r.fix)} · Impact: ${escapeHtml(r.impact)}</p></article>`).join("") : `<p class="ca-empty">${escapeHtml(result.traffic?.reason || "No traffic comparison yet.")}</p>`}
       <p class="ca-hint">${escapeHtml(result.traffic?.disclaimer || "These are possible on-page disadvantages, not verified traffic.")}</p>
@@ -1054,13 +1084,10 @@
       <h3>Humanization</h3>
       <p>${result.humanization?.status === "unavailable" ? escapeHtml(result.humanization?.reason || "Humanization unavailable") : `Score ${scoreNum(result.humanization?.score)} · ${escapeHtml(result.humanization?.interpretation || "")}`}</p>
       <p>${(result.humanization?.ai_like_phrases || []).map((p) => `<span class="ca-tag">${escapeHtml(p)}</span>`).join(" ")}</p>
-      <h3>Originality</h3>
-      <p>Score ${scoreNum(result.originality?.score)} · similarity ${scoreNum(result.originality?.similarity_pct)}% · ${escapeHtml(result.originality?.risk || result.originality?.reason || "")}</p>
-      <p class="ca-hint">${escapeHtml(result.originality?.disclaimer || "")}</p>
       <h3>Action plan</h3>
       ${plan.length ? tableRows(["Priority","Category","Issue","Action","Impact","Effort"],
         plan.map((p) => [
-          escapeHtml(p.priority), escapeHtml(p.category), escapeHtml(p.issue),
+          escapeHtml(p.priority), escapeHtml(p.category), escapeHtml(p.issue) + dependsTag(pending && p.depends_on_keyword),
           escapeHtml(p.recommended_action), escapeHtml(p.estimated_impact), escapeHtml(p.estimated_effort)
         ])) : sectionNote(result.action_plan_report, `<p class="ca-empty">No actions generated.</p>`)}
     `;
@@ -1086,9 +1113,10 @@
       return;
     }
     if (kind === "csv") {
-      const rows = [["keyword","type","in_mine","in_competitor","intent","opportunity"]];
-      (result.keywords?.table || []).forEach((k) => {
-        rows.push([k.keyword, k.type, k.my_blog_status || k.found_in_my_blog, k.found_in_competitor, k.search_intent || k.intent, k.opportunity]);
+      const rows = [["group","keyword","why","search_volume"]];
+      const f = keywordFocus(result);
+      [["your_blog", f.ours], ["competitors", f.competitors], ["opportunity", f.opportunities]].forEach(([group, list]) => {
+        list.forEach((k) => rows.push([group, k.keyword, k.evidence || "", k.search_volume ?? "Data unavailable"]));
       });
       downloadFile(stamp + "-keywords.csv", rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv");
       return;
@@ -1116,7 +1144,20 @@
   document.querySelectorAll("[data-export]").forEach((btn) => {
     btn.addEventListener("click", () => exportReport(btn.dataset.export));
   });
-  ["ca-filter-priority", "ca-filter-kwtype", "ca-filter-intent"].forEach((id) => {
+
+  dashBody?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-mismatch]");
+    const mismatch = currentResult?.keyword_mismatch;
+    if (!btn || !mismatch) return;
+    if (btn.dataset.mismatch === "rerun") {
+      keywordInput.value = mismatch.search_console_query;
+      runAnalysis();
+    } else {
+      mismatch.confirmed = true;
+      renderDashboard(currentResult);
+    }
+  });
+  ["ca-filter-priority"].forEach((id) => {
     document.getElementById(id)?.addEventListener("change", () => {
       if (currentResult) renderDashboard(currentResult);
     });

@@ -18,6 +18,12 @@ import requests
 from bs4 import BeautifulSoup
 
 from acl_agent.config import SERP_RESULTS_COUNT, logger
+from acl_agent.keywords import (
+    domain_nouns,
+    is_search_phrase,
+    noun_chunk_phrases,
+    phrase_segments,
+)
 
 
 @dataclass
@@ -54,6 +60,64 @@ def _unwrap_bing_href(href: str) -> str:
     if decoded.startswith("http"):
         return decoded
     return href
+
+
+_SERP_STOPWORDS = {
+    "the", "and", "for", "with", "from", "best", "your", "our", "how",
+    "complete", "guide", "blog", "news", "post", "what", "why", "when",
+}
+_SERP_REFERENCE_HOSTS = (
+    "merriam-webster.com",
+    "dictionary.cambridge.org",
+    "wiktionary.org",
+    "dictionary.com",
+    "vocabulary.com",
+    "thefreedictionary.com",
+    "collinsdictionary.com",
+    "w3schools.com",
+    "wikipedia.org",
+    "britannica.com",
+)
+
+
+def _serp_query_tokens(keyword: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", (keyword or "").lower())
+        if len(token) > 2 and token not in _SERP_STOPWORDS
+    ]
+
+
+def _serp_blob(result: SERPResult) -> str:
+    return f"{result.title} {result.url} {result.snippet}".lower().replace("'", "")
+
+
+def _serp_token_hits(keyword: str, result: SERPResult) -> int:
+    blob = _serp_blob(result)
+    hits = 0
+    for token in _serp_query_tokens(keyword):
+        stem = token[:-1] if token.endswith("s") and len(token) > 3 else token
+        if token in blob or stem in blob:
+            hits += 1
+    return hits
+
+
+def _serp_results_match_query(keyword: str, results: list[SERPResult]) -> bool:
+    """False when Bing/DDG returned dictionary junk instead of the query."""
+    tokens = _serp_query_tokens(keyword)
+    if not results:
+        return False
+    if len(tokens) <= 1:
+        return True
+    needed = 2 if len(tokens) >= 2 else 1
+    on_topic = 0
+    for result in results:
+        host = urlparse(result.url).netloc.lower().removeprefix("www.")
+        if any(host == item or host.endswith("." + item) for item in _SERP_REFERENCE_HOSTS):
+            continue
+        if _serp_token_hits(keyword, result) >= needed:
+            on_topic += 1
+    return on_topic >= 1
 
 
 def _search_bing(
@@ -126,6 +190,7 @@ def search_serp(
     if shorter and shorter.lower() != keyword.strip().lower():
         queries.append(shorter)
 
+    last_bing: list[SERPResult] = []
     for query in queries:
         if not query:
             continue
@@ -134,18 +199,25 @@ def search_serp(
         except Exception as error:
             logger.warning("Bing HTML search failed for '%s': %s", query, error)
             bing_results = []
-        if bing_results:
+        if _serp_results_match_query(keyword, bing_results):
             return bing_results
+        if bing_results:
+            last_bing = bing_results
+            logger.warning(
+                "Bing HTML results look off-topic for '%s' (%s rows); trying DuckDuckGo",
+                query,
+                len(bing_results),
+            )
 
     try:
         from ddgs import DDGS
     except ImportError:
         logger.warning("ddgs not installed. Run: pip install ddgs")
-        return []
+        return last_bing
 
     for query in queries:
         try:
-            with DDGS(timeout=8) as ddgs:
+            with DDGS(timeout=12) as ddgs:
                 rows = list(ddgs.text(query, max_results=max_results, region="us-en", backend="duckduckgo"))
         except Exception as error:
             logger.warning("SERP duckduckgo failed for '%s': %s", query, error)
@@ -162,9 +234,12 @@ def search_serp(
                     snippet=row.get("body") or row.get("description") or "",
                 )
             )
-        if results:
+        if _serp_results_match_query(keyword, results):
+            logger.info("DuckDuckGo returned %s on-topic results for '%s'", len(results), query)
             return results
-    return []
+        if results and not last_bing:
+            return results
+    return last_bing
 
 
 def extract_nlp_keywords(
@@ -221,24 +296,26 @@ def extract_nlp_keywords(
         and not w.isdigit()
     ]
 
-    # Extract bigrams
+    # Extract bigrams within one sentence/clause, noun-phrase shaped only
     bigrams: list[str] = []
-    sentences = re.split(r"[.!?]+", all_text)
-
-    for sentence in sentences:
-        sentence_words = sentence.split()
+    nouns = domain_nouns(keyword)
+    allowed = noun_chunk_phrases(all_text)
+    for sentence_words in phrase_segments(all_text):
         for i in range(len(sentence_words) - 1):
             w1, w2 = (
                 sentence_words[i],
                 sentence_words[i + 1],
             )
+            phrase = f"{w1} {w2}"
             if (
                 w1 not in stopwords
                 and w2 not in stopwords
                 and len(w1) > 2
                 and len(w2) > 2
+                and is_search_phrase(phrase, nouns)
+                and (allowed is None or phrase in allowed)
             ):
-                bigrams.append(f"{w1} {w2}")
+                bigrams.append(phrase)
 
     # Count frequencies
     unigram_counts = Counter(unigrams)

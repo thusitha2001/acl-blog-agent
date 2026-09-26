@@ -10,7 +10,6 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
-
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -454,7 +453,7 @@ class CompetitorAnalyzeRequest(BaseModel):
     competitor_urls: list[str] = Field(default_factory=list)
     country: Optional[str] = Field(default="us", max_length=8)
     language: Optional[str] = Field(default="en", max_length=8)
-    competitor_count: Optional[int] = Field(default=5, ge=3, le=10)
+    months: Optional[int] = Field(default=6, ge=1, le=12)
     client_analysis_id: Optional[str] = Field(default=None, max_length=80)
 
     @field_validator("blog_url")
@@ -878,19 +877,24 @@ async def analyze_competitors_stream_endpoint(
     request: CompetitorAnalyzeRequest,
     _user: dict = Depends(require_auth),
 ):
-    if not request.blog_url and not request.keyword and not request.competitor_urls:
+    if not request.keyword:
         raise HTTPException(
             status_code=400,
-            detail={"message": "Enter a blog URL, a target keyword, or competitor URLs."},
+            detail={"message": "Enter a target keyword."},
+        )
+    if not request.blog_url and not request.competitor_urls:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Enter a blog URL or at least one competitor URL."},
         )
 
     logger.info(
-        "analyze-competitors-stream blog_url=%r keyword=%r country=%s language=%s count=%s urls=%s client_id=%s",
+        "analyze-competitors-stream blog_url=%r keyword=%r country=%s language=%s months=%s urls=%s client_id=%s",
         request.blog_url,
         request.keyword,
         request.country,
         request.language,
-        request.competitor_count,
+        request.months,
         request.competitor_urls,
         request.client_analysis_id,
     )
@@ -898,6 +902,7 @@ async def analyze_competitors_stream_endpoint(
     request_id = str(uuid.uuid4())
     queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
     worker_loop: "asyncio.AbstractEventLoop | None" = None
+    competitor_urls = list(request.competitor_urls or [])
 
     async def event_stream():
         nonlocal worker_loop
@@ -919,10 +924,10 @@ async def analyze_competitors_stream_endpoint(
                     analyze_competitors,
                     blog_url=request.blog_url,
                     keyword=request.keyword,
-                    competitor_urls=request.competitor_urls,
+                    competitor_urls=competitor_urls,
                     country=request.country,
                     language=request.language,
-                    competitor_count=request.competitor_count,
+                    months=request.months,
                     client_analysis_id=request.client_analysis_id,
                     on_progress=lambda stage, message: emit(
                         "stage",

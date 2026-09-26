@@ -1,0 +1,5 @@
+# Optional: enables the spaCy noun-chunk gate in acl_agent/keywords.py.
+# Without these, keyword extraction falls back to the word-list rules.
+# Set ACL_DISABLE_SPACY=1 to turn the gate off even when installed.
+spacy>=3.7,<4
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

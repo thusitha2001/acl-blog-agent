@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from acl_agent.auto_brief import SERPResult
+from acl_agent.auto_brief import SERPResult, _serp_results_match_query, search_serp
 from acl_agent.competitors import (
     _competitor_does_well,
     _extract_modified_datetime,
@@ -179,7 +179,7 @@ class AutoCompetitorFillTests(unittest.TestCase):
 
     def test_manual_urls_kept_then_auto_fill(self):
         pending = [
-            {"is_manual": True, "topic": 0, "extract_ok": True, "row": {"url": "https://manual.com/a"}},
+            {"is_manual": True, "topic": 5, "topic_mismatch": False, "extract_ok": True, "row": {"url": "https://manual.com/a"}},
             {"is_manual": False, "topic": 5, "extract_ok": True, "row": {"url": "https://auto.com/1"}},
             {"is_manual": False, "topic": 4, "extract_ok": True, "row": {"url": "https://auto.com/2"}},
             {"is_manual": False, "topic": 1, "extract_ok": False, "row": {"url": "https://auto.com/3"}},
@@ -189,6 +189,92 @@ class AutoCompetitorFillTests(unittest.TestCase):
         selected = _select_competitor_rows(pending, target=5, needed=3)
         self.assertEqual(len(selected), 5)
         self.assertEqual(selected[0]["url"], "https://manual.com/a")
+
+    def test_off_topic_manuals_are_not_kept_as_normal_competitors(self):
+        pending = [
+            {"is_manual": True, "topic": 0, "topic_mismatch": True, "extract_ok": True, "row": {"url": "https://blackberrys.com/hoodie"}},
+            {"is_manual": False, "topic": 5, "topic_mismatch": False, "extract_ok": True, "row": {"url": "https://bali.example/lempuyang"}},
+            {"is_manual": False, "topic": 4, "topic_mismatch": False, "extract_ok": True, "row": {"url": "https://bali.example/gate"}},
+            {"is_manual": False, "topic": 4, "topic_mismatch": False, "extract_ok": True, "row": {"url": "https://travel.example/temple"}},
+            {"is_manual": False, "topic": 1, "topic_mismatch": False, "extract_ok": False, "row": {"url": "https://weak.example/a"}},
+            {"is_manual": False, "topic": 1, "topic_mismatch": False, "extract_ok": False, "row": {"url": "https://weak.example/b"}},
+        ]
+        selected = _select_competitor_rows(pending, target=5, needed=3)
+        urls = [row["url"] for row in selected]
+        self.assertNotIn("https://blackberrys.com/hoodie", urls)
+        self.assertEqual(urls[0], "https://bali.example/lempuyang")
+
+
+class SerpQualityTests(unittest.TestCase):
+    def test_dictionary_bing_hits_are_off_topic(self):
+        rows = [
+            SERPResult("STYLE Definition & Meaning", "https://www.merriam-webster.com/dictionary/style", "style"),
+            SERPResult("InStyle homepage", "https://www.instyle.com/", "celebrity style"),
+            SERPResult("HTML style tag", "https://www.w3schools.com/TAGs/tag_style.asp", "style attribute"),
+        ]
+        self.assertFalse(_serp_results_match_query("style mens oversized hoodies", rows))
+
+    def test_hoodie_guides_are_on_topic(self):
+        rows = [
+            SERPResult(
+                "15 Ways to Style an Oversized Hoodie for Men",
+                "https://urbanmenstyle.com/ways-to-style-an-oversized-hoodie-for-men/",
+                "outfit ideas for oversized hoodies",
+            ),
+        ]
+        self.assertTrue(_serp_results_match_query("style mens oversized hoodies", rows))
+
+    def test_order_keeps_hoodie_guides(self):
+        results = [
+            SERPResult("STYLE Definition", "https://www.merriam-webster.com/dictionary/style", "style"),
+            SERPResult(
+                "15 Ways to Style an Oversized Hoodie for Men",
+                "https://urbanmenstyle.com/hoodie",
+                "oversized hoodie outfits",
+            ),
+            SERPResult(
+                "How to Style Men's Oversized Hoodies",
+                "https://www.example.com/style-mens-oversized-hoodies",
+                "outfit ideas",
+            ),
+        ]
+        ordered = _order_serp_results("style mens oversized hoodies", results)
+        urls = " ".join(item.url for item in ordered)
+        self.assertIn("urbanmenstyle.com", urls)
+        self.assertIn("example.com", urls)
+        self.assertNotIn("merriam-webster", urls)
+
+    def test_search_serp_falls_through_to_duckduckgo(self):
+        bing = [
+            SERPResult("STYLE Definition", "https://www.merriam-webster.com/dictionary/style", "style"),
+        ]
+        ddg_rows = [
+            {
+                "title": "How to Style Men's Oversized Hoodies",
+                "href": "https://urbanmenstyle.com/hoodie",
+                "body": "oversized hoodie outfit ideas for men",
+            }
+        ]
+
+        class FakeDDGS:
+            def __init__(self, timeout=12):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def text(self, query, max_results=10, region="us-en", backend="duckduckgo"):
+                return ddg_rows
+
+        from unittest.mock import patch
+        with patch("acl_agent.auto_brief._search_bing", return_value=bing), patch(
+            "ddgs.DDGS", FakeDDGS
+        ):
+            rows = search_serp("style mens oversized hoodies", max_results=8)
+        self.assertEqual(rows[0].url, "https://urbanmenstyle.com/hoodie")
 
 
 if __name__ == "__main__":
