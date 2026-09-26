@@ -15,6 +15,7 @@ from acl_agent.analysis_input import (
 from acl_agent.analysis_report import humanization_report, originality_report
 from acl_agent.api import CompetitorAnalyzeRequest
 from acl_agent.competitors import analyze_competitors, _score_page
+from acl_agent.keywords import compare_keywords
 from acl_agent.gsc_diagnosis import unavailable_diagnosis
 from acl_agent.readability import analyze_readability
 
@@ -173,7 +174,19 @@ def _scrape_blog_or_decor(url: str) -> dict:
     return dict(DECOR_PAGE) if "competitor.example" in url else dict(BEDDING_PAGE)
 
 
-class AnalysisFlowTests(unittest.TestCase):
+class _SkipAnalysisLlmMixin:
+    def setUp(self):
+        self._llm_patch = patch(
+            "acl_agent.competitors.enrich_analysis_with_llm",
+            return_value={"status": "skipped", "reason": "unit test"},
+        )
+        self._llm_patch.start()
+
+    def tearDown(self):
+        self._llm_patch.stop()
+
+
+class AnalysisFlowTests(_SkipAnalysisLlmMixin, unittest.TestCase):
     def test_user_keyword_is_used_and_live_search_never_runs(self):
         with patch("acl_agent.competitors._scrape_url", side_effect=_scrape_blog_or_decor), patch(
             "acl_agent.competitors.search_serp"
@@ -252,7 +265,7 @@ class AnalysisFlowTests(unittest.TestCase):
         self.assertTrue(result["analysis_id"])
 
 
-class CompetitorUrlIsolationTests(unittest.TestCase):
+class CompetitorUrlIsolationTests(_SkipAnalysisLlmMixin, unittest.TestCase):
     HOODIE_URLS = [
         "https://blackberrys.com/oversized-hoodie",
         "https://nobero.com/hoodie-blog",
@@ -403,7 +416,7 @@ class CompetitorStreamIsolationTests(unittest.TestCase):
         analyze.assert_not_called()
 
 
-class GscPipelineIsolationTests(unittest.TestCase):
+class GscPipelineIsolationTests(_SkipAnalysisLlmMixin, unittest.TestCase):
     def test_analyze_competitors_survives_gsc_raise(self):
         with patch("acl_agent.competitors._scrape_url", side_effect=_scrape_blog_or_decor), patch(
             "acl_agent.competitors.diagnose_page_visibility",

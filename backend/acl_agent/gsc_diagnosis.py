@@ -15,7 +15,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from acl_agent.config import logger
-from acl_agent.keywords import content_tokens, fold_phrase, _intent
+from acl_agent.keywords import content_tokens, fold_phrase, relevance_score, _intent
 from acl_agent.metrics import UNAVAILABLE
 
 GSC_TEST_ROOT = Path(os.environ.get("GSC_TEST_ROOT", r"C:\Users\thusitha\gsc-test"))
@@ -286,9 +286,95 @@ def enrich_gsc_periods(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _coverage_means_indexed(coverage: str) -> Optional[bool]:
+    text = (coverage or "").strip().lower()
+    if not text:
+        return None
+    if "not indexed" in text or "unknown to google" in text:
+        return False
+    if "excluded" in text or "blocked" in text:
+        return False
+    if "indexed" in text:
+        return True
+    return None
+
+
+def build_index_status(
+    gsc: Optional[dict[str, Any]] = None,
+    page: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Google index yes/no from URL Inspection only — never from robots or impressions."""
+    gsc = gsc or {}
+    page = page or {}
+    indexing = gsc.get("indexing") or {}
+    inspection = indexing.get("inspection") or gsc.get("inspection") or {}
+    robots = str(indexing.get("robots") or page.get("robots") or "")
+    robots_status = indexing.get("status")
+    if robots_status not in ("indexable", "noindex"):
+        robots_status = "noindex" if "noindex" in robots.lower() else ("indexable" if robots else "")
+    impressions = gsc.get("impressions")
+    coverage = inspection.get("coverage_state") or indexing.get("coverage_state")
+    available = bool(inspection.get("available") and coverage)
+
+    if available:
+        indexed = _coverage_means_indexed(str(coverage))
+        if indexed is True:
+            label = "Indexed"
+        elif indexed is False:
+            label = "Not indexed"
+        else:
+            label = str(coverage)
+        return {
+            "indexed": indexed,
+            "label": label,
+            "coverage_state": coverage,
+            "indexing_state": inspection.get("indexing_state") or indexing.get("indexing_state"),
+            "last_crawl": inspection.get("last_crawl") or indexing.get("last_crawl"),
+            "verdict": inspection.get("verdict") or indexing.get("verdict"),
+            "google_canonical": inspection.get("google_canonical") or indexing.get("google_canonical"),
+            "robots": robots or None,
+            "robots_status": robots_status or None,
+            "source": "url_inspection",
+            "available": True,
+            "note": "From Search Console URL Inspection.",
+            "impressions_hint": None,
+        }
+
+    hint = None
+    if isinstance(impressions, (int, float)) and impressions > 0:
+        hint = (
+            f"Search Console recorded {int(impressions)} impressions. "
+            "That means Google has shown this URL; it is not a coverage-state check."
+        )
+    if robots_status == "noindex":
+        note = "Page robots is noindex. That blocks indexing; it is not a Google coverage-state check."
+        source = "robots_only"
+    elif robots:
+        note = "Page robots allows indexing. Allowed to be indexed is not the same as in Google’s index."
+        source = "robots_only"
+    else:
+        note = "URL Inspection did not return a coverage state."
+        source = "unavailable"
+    return {
+        "indexed": None,
+        "label": "Inspection unavailable",
+        "coverage_state": None,
+        "indexing_state": None,
+        "last_crawl": None,
+        "verdict": None,
+        "google_canonical": None,
+        "robots": robots or None,
+        "robots_status": robots_status or None,
+        "source": source,
+        "available": False,
+        "note": note,
+        "impressions_hint": hint,
+    }
+
+
 def unavailable_diagnosis(reason: str, url: str = "", days: int = 180) -> dict[str, Any]:
     window = diagnosis_window(round(days / 30) if days else DEFAULT_MONTHS)
-    return {
+    payload = {
         "status": "unavailable",
         "reason": reason,
         "url": url,
@@ -316,6 +402,8 @@ def unavailable_diagnosis(reason: str, url: str = "", days: int = 180) -> dict[s
             "items": [],
         },
     }
+    payload["index_status"] = build_index_status(payload)
+    return payload
 
 
 def _host(url: str) -> str:
@@ -361,7 +449,13 @@ def _on_page_audit(blog_url: str, page: Optional[dict[str, Any]], target_keyword
     off_topic = []
     for heading in heads:
         tokens = set(content_tokens(heading))
-        if tokens and kw_tokens and not (tokens & kw_tokens) and len(heading.split()) >= 4:
+        if (
+            tokens
+            and kw_tokens
+            and not (tokens & kw_tokens)
+            and len(heading.split()) >= 4
+            and relevance_score(heading, target_keyword) < 0.12
+        ):
             off_topic.append(heading)
     title_issues = []
     if not title:
@@ -404,6 +498,7 @@ def _on_page_audit(blog_url: str, page: Optional[dict[str, Any]], target_keyword
             "robots": robots or UNAVAILABLE,
             "canonical": canonical or UNAVAILABLE,
             "status": "indexable" if indexed else "noindex",
+            "source": "robots_only",
         },
         "internal_linking": {
             "count": int(internal or 0),
@@ -553,6 +648,7 @@ def _payload_from_metrics(
     }
     payload.update(audit)
     payload["recommended_actions"] = _gsc_actions(payload, target_keyword)
+    payload["index_status"] = build_index_status(payload)
     return payload
 
 
@@ -745,6 +841,23 @@ def adapt_gsc_test_diagnosis(
             "canonical": page_meta.get("canonical") or (audit.get("indexing") or {}).get("canonical") or UNAVAILABLE,
             "status": index_status,
             "issues": indexing_issues,
+            "inspection": inspection if inspection else {},
+            "coverage_state": inspection.get("coverage_state") if inspection.get("available") else None,
+            "indexing_state": inspection.get("indexing_state") if inspection.get("available") else None,
+            "last_crawl": inspection.get("last_crawl") if inspection.get("available") else None,
+            "verdict": inspection.get("verdict") if inspection.get("available") else None,
+            "google_canonical": inspection.get("google_canonical") if inspection.get("available") else None,
+            "available": bool(inspection.get("available") and inspection.get("coverage_state")),
+            "source": (
+                "url_inspection"
+                if inspection.get("available") and inspection.get("coverage_state")
+                else "robots_only"
+            ),
+            "indexed": (
+                _coverage_means_indexed(str(inspection.get("coverage_state") or ""))
+                if inspection.get("available") and inspection.get("coverage_state")
+                else None
+            ),
         },
         "internal_linking": {
             "count": int(links.get("internal_count") or audit.get("internal_linking", {}).get("count") or 0),
@@ -756,6 +869,7 @@ def adapt_gsc_test_diagnosis(
         "word_count": int(page_meta.get("word_count") or audit.get("word_count") or 0),
     }
     payload["recommended_actions"] = actions or _gsc_actions(payload, target_keyword)
+    payload["index_status"] = build_index_status(payload, page)
     return payload
 
 
@@ -783,6 +897,7 @@ def diagnose_page_visibility(
             payload.update(audit)
             payload["days"] = days
             payload["recommended_actions"] = _gsc_actions(payload, target_keyword)
+            payload["index_status"] = build_index_status(payload, page)
             return payload
         return _payload_from_metrics(url, days, audit, gsc_metrics, target_keyword)
 
@@ -797,6 +912,7 @@ def diagnose_page_visibility(
         payload.update(audit)
         payload["days"] = days
         payload["recommended_actions"] = _gsc_actions(payload, target_keyword)
+        payload["index_status"] = build_index_status(payload, page)
         return payload
     return adapt_gsc_test_diagnosis(
         raw,
@@ -990,6 +1106,8 @@ def build_diagnosis_summary(
         drop_abs = (comparisons.get("previous") or {}).get("impressions_delta")
     if isinstance(drop_pct, (int, float)) and drop_pct <= -30:
         confidence = "high" if sample_ok else "low"
+        if seasonal and yoy_pct is None and confidence == "high":
+            confidence = "medium"
         period = (diagnosis.get("period") or {}).get("label") or ""
         window_note = f" over {period.lower()}" if period else ""
         delta_note = f"{drop_pct:.0f}% impressions vs the previous period"
@@ -1009,7 +1127,7 @@ def build_diagnosis_summary(
             delta_note += f"; also {yoy_pct:.0f}% vs last year"
         return pack(
             "visibility_drop",
-            f"Visibility drop{window_note} — investigate deindexing/technical issue ({delta_note}).",
+            f"Visibility drop{window_note} ({delta_note}).",
             confidence,
             delta_pct=drop_pct,
             delta=drop_abs,

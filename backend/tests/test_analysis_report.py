@@ -3,7 +3,17 @@ from __future__ import annotations
 
 import unittest
 
-from acl_agent.analysis_report import action_plan, image_alt_report
+from acl_agent.analysis_report import (
+    action_plan,
+    annotate_actions,
+    build_verdict_summary,
+    competitor_difference,
+    ctr_checklist,
+    gsc_query_opportunities,
+    image_alt_report,
+    merged_content_opportunities,
+    quick_wins,
+)
 from acl_agent.keywords import compare_keywords, extract_terms
 from acl_agent.readability import analyze_readability
 
@@ -101,6 +111,160 @@ class ImageAltTests(unittest.TestCase):
         page = {"images": [{"alt": a, "has_alt_attr": True} for a in alts]}
         report = image_alt_report(page, [], "reusable produce bags")
         self.assertEqual(report["summary"]["stuffed"], 2)
+
+
+class ReportAssemblyTests(unittest.TestCase):
+    def test_verdict_uses_diagnosis_and_best_gsc_query(self):
+        verdict = build_verdict_summary(
+            {
+                "text": "Visibility drop over last 6 months (-82% impressions).",
+                "confidence": "medium",
+                "seasonal_caveat": True,
+                "delta_pct": -82.3,
+            },
+            {
+                "our_blog_basis": "search_console",
+                "our_blog": [{
+                    "keyword": "how to make christmas dinner for a crowd",
+                    "evidence": "80 clicks · 900 impressions · avg position 8.8",
+                    "source": "search_console",
+                }],
+            },
+            {"target_keyword": "christmas dinner ideas", "search_console_query": "how to make christmas dinner for a crowd"},
+            {
+                "keyword_targeting": {"mismatch": True, "in_title": False, "in_h1": False},
+                "title": {"issues": ["Title does not contain the target keyword"]},
+                "h1": {"issues": ["H1 does not contain the target keyword"]},
+            },
+            {"title": "Best Christmas Dinner Ideas for a Large Group", "h1": "15 Dishes to Delight"},
+        )
+        self.assertTrue(any("-82.3%" in line or "-82.3" in line for line in verdict["observed"]))
+        self.assertTrue(any("how to make christmas dinner for a crowd" in line for line in verdict["observed"]))
+        self.assertTrue(any("8.8" in line for line in verdict["observed"]))
+        self.assertTrue(any("Title and H1" in line for line in verdict["observed"]))
+        self.assertIn("Seasonality", verdict["areas_to_check"])
+        self.assertTrue(any("year-over-year" in line for line in verdict["verification"]))
+        self.assertIn("medium", verdict["text"])
+
+    def test_verdict_reports_url_inspection_indexed(self):
+        verdict = build_verdict_summary(
+            {"text": "Visibility drop.", "confidence": "high", "delta_pct": -10},
+            {},
+            None,
+            {
+                "index_status": {
+                    "indexed": True,
+                    "label": "Indexed",
+                    "coverage_state": "Submitted and indexed",
+                    "last_crawl": "2026-09-20T08:00:00Z",
+                    "source": "url_inspection",
+                },
+            },
+        )
+        self.assertTrue(any("Indexed" in line for line in verdict["observed"]))
+        self.assertTrue(any("Submitted and indexed" in line for line in verdict["observed"]))
+        self.assertTrue(any("URL Inspection already returned" in line for line in verdict["verification"]))
+        self.assertFalse(any("Check URL indexing" in line for line in verdict["verification"]))
+
+    def test_verdict_does_not_claim_indexed_from_robots(self):
+        verdict = build_verdict_summary(
+            {"text": "Visibility drop.", "confidence": "medium"},
+            {},
+            None,
+            {
+                "index_status": {
+                    "indexed": None,
+                    "label": "Inspection unavailable",
+                    "source": "robots_only",
+                    "robots_status": "indexable",
+                    "impressions_hint": "Search Console recorded 447 impressions. That means Google has shown this URL; it is not a coverage-state check.",
+                },
+                "indexing": {"status": "indexable"},
+            },
+        )
+        self.assertTrue(any("Inspection unavailable" in line for line in verdict["observed"]))
+        self.assertTrue(any("not a Google index check" in line for line in verdict["observed"]))
+        self.assertFalse(any(line.startswith("Google index: Indexed") for line in verdict["observed"]))
+        self.assertTrue(any("Check URL indexing" in line for line in verdict["verification"]))
+
+    def test_merged_table_dedupes_near_duplicate_gap_and_heading(self):
+        merged = merged_content_opportunities(
+            [{"keyword": "christmas dinner cost", "evidence": "Used by 2 competitors"}],
+            {"table": [
+                {"missing_topic": "Christmas dinner cost table", "covered_by": "a.example", "importance": "high", "recommended_heading": "What does Christmas dinner cost?"},
+                {"missing_topic": "Make-ahead sides", "covered_by": "b.example", "importance": "medium", "recommended_heading": "Make-ahead sides"},
+            ]},
+        )
+        topics = [row["topic"] for row in merged["table"]]
+        self.assertTrue(any("cost" in topic.lower() for topic in topics))
+        self.assertIn("Make-ahead sides", topics)
+        dual = [row for row in merged["table"] if "keyword_gap" in row["sources"] and "heading_gap" in row["sources"]]
+        self.assertTrue(dual)
+
+    def test_competitor_difference_omits_weak_gaps(self):
+        self.assertIsNone(competitor_difference(
+            {"word_count": 1400, "table_count": 1},
+            {"onpage_technical_score": 70},
+            {"word_count": 1500, "table_count": 1, "scores": {"onpage_technical_score": 72}, "signals": []},
+            [],
+        ))
+        sentence = competitor_difference(
+            {"word_count": 800, "table_count": 0},
+            {"onpage_technical_score": 40},
+            {
+                "word_count": 2400,
+                "table_count": 1,
+                "scores": {"onpage_technical_score": 70},
+                "signals": [{"kind": "positive", "label": "Clear buying criteria"}],
+            },
+            [],
+        )
+        self.assertIn("2,400 words", sentence)
+        self.assertIn("3.0x", sentence)
+
+    def test_actions_get_why_confidence_and_no_click_forecast(self):
+        plan = annotate_actions(
+            [{
+                "priority": "High Priority",
+                "category": "Title",
+                "issue": "Title mismatch",
+                "recommended_action": "Rewrite the title",
+                "estimated_impact": "~990 clicks per period",
+                "estimated_effort": "Low",
+            }],
+            {"keyword_targeting": {"mismatch": True, "primary_ranking_query": "how to make christmas dinner for a crowd"}},
+        )
+        self.assertEqual(plan[0]["coverage_class"], "must")
+        self.assertEqual(plan[0]["recommendation_confidence"], "high")
+        self.assertTrue(plan[0]["why"])
+        self.assertEqual(plan[0]["estimated_impact"], "High")
+        self.assertIn("Not a traffic forecast", plan[0]["impact_note"])
+        self.assertEqual(len(quick_wins(plan)), 1)
+
+    def test_gsc_buckets_and_ctr_checklist_use_existing_queries(self):
+        gsc = {
+            "impressions": 2000,
+            "ctr": 0.001,
+            "position": 9.4,
+            "intent_split": {"informational": 2000},
+            "keyword_targeting": {"mismatch": True, "in_title": False},
+            "meta": {"issues": ["Meta description is thin"]},
+            "queries": [
+                {"query": "christmas dinner for a crowd", "position": 8.8, "impressions": 900, "clicks": 80},
+                {"query": "easy christmas dinner", "position": 14.0, "impressions": 200, "clicks": 2},
+                {"query": "christmas soup recipes", "position": 28.0, "impressions": 40, "clicks": 0},
+                {"query": "brand shop", "position": 5.0, "impressions": 10, "clicks": 8, "branded": True},
+            ],
+        }
+        buckets = gsc_query_opportunities(gsc)
+        self.assertEqual([row["query"] for row in buckets["quick_wins"]], ["christmas dinner for a crowd"])
+        self.assertEqual([row["query"] for row in buckets["page_two"]], ["easy christmas dinner"])
+        self.assertEqual([row["query"] for row in buckets["content"]], ["christmas soup recipes"])
+        self.assertNotIn("brand shop", [row["query"] for group in buckets.values() if isinstance(group, list) for row in group])
+        ctr = ctr_checklist(gsc)
+        self.assertEqual(ctr["status"], "gap")
+        self.assertTrue(any("Title" in item for item in ctr["possible_checks"]))
+        self.assertIn("not a click forecast", ctr["note"].lower())
 
 
 if __name__ == "__main__":

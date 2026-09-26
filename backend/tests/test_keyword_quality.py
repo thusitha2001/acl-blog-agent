@@ -207,10 +207,27 @@ class ScoreAndPlanTests(unittest.TestCase):
         self.assertEqual(scores["reports"]["sxo"]["status"], "available")
         self.assertTrue(scores["reports"]["aio"]["factors"])
         self.assertTrue(scores["reports"]["sxo"]["factors"])
+        self.assertIn("keyword_targeting_score", scores)
+        self.assertIn("onpage_technical_score", scores)
         names = {f["name"] for f in scores["reports"]["aio"]["factors"]}
         self.assertIn("Entity clarity", names)
         sxo_names = {f["name"] for f in scores["reports"]["sxo"]["factors"]}
         self.assertIn("Search intent match", sxo_names)
+
+    def test_heuristic_fallback_keeps_low_confidence_and_reason(self):
+        from unittest.mock import patch
+
+        from acl_agent.competitors import _public_score_block
+
+        with patch("acl_agent.competitors.score_article", side_effect=RuntimeError("bad brief")):
+            scores = _score_page("style mens oversized hoodies", HOODIE_PAGE)
+        self.assertEqual(scores["status"], "ok")
+        self.assertEqual(scores["confidence"], "low")
+        self.assertIn("fallback scorer", scores["reason"])
+        public = _public_score_block(scores)
+        self.assertEqual(public["confidence"], "low")
+        self.assertIn("fallback scorer", public["reason"])
+        self.assertEqual(public["status"], "ok")
 
     def test_null_aio_sxo_do_not_break_averages(self):
         rows = [
@@ -237,6 +254,15 @@ class ScoreAndPlanTests(unittest.TestCase):
         gaps = content_gaps(HOODIE_PAGE, [GUIDE_COMPETITOR], "style mens oversized hoodies")
         self.assertTrue(gaps["recommended_outline"])
         self.assertTrue(any("fit" in h.lower() or "pants" in h.lower() or "faq" in h.lower() for h in gaps["recommended_outline"]))
+
+    def test_hoodie_keyword_does_not_invent_style_gaps(self):
+        gaps = content_gaps(HOODIE_PAGE, [], "style mens oversized hoodies")
+        blob = " ".join(
+            [row["missing_topic"] for row in gaps["table"]]
+            + gaps["recommended_outline"]
+        ).lower()
+        self.assertNotIn("what makes an oversized hoodie look stylish", blob)
+        self.assertFalse(any(row.get("evidence_type") == "semantic_gap" for row in gaps["table"]))
 
 
 PLACEMAT_TITLE = "Different Types of Placemats With a Tablecloth"
@@ -669,12 +695,19 @@ class GapStrictnessTests(unittest.TestCase):
 class KeywordFocusTests(unittest.TestCase):
     def test_each_group_is_capped_and_unique(self):
         focus = keyword_focus("leather placemats", FOCUS_TABLE, None, competitor_total=3)
-        groups = [focus["our_blog"], focus["competitors"], focus["opportunities"]]
+        groups = [
+            focus["our_blog"],
+            focus["competitors"],
+            focus["close_to_ranking"],
+            focus["new_topics"],
+        ]
         self.assertTrue(all(len(group) <= 3 for group in groups))
         keys = [item["keyword"] for group in groups for item in group]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(focus["our_blog_basis"], "on_page")
         self.assertEqual(focus["our_blog"][0]["keyword"], "leather placemats")
+        self.assertEqual(focus["close_to_ranking"], [])
+        self.assertEqual(focus["opportunities"], focus["new_topics"])
 
     def test_competitor_group_ranks_by_competitor_use_and_skips_target(self):
         focus = keyword_focus("leather placemats", FOCUS_TABLE, None, competitor_total=3)
@@ -685,12 +718,13 @@ class KeywordFocusTests(unittest.TestCase):
 
     def test_opportunities_are_relevant_gaps_and_volume_is_never_invented(self):
         focus = keyword_focus("leather placemats", FOCUS_TABLE, None, competitor_total=3)
-        names = [item["keyword"] for item in focus["opportunities"]]
+        names = [item["keyword"] for item in focus["new_topics"]]
         self.assertNotIn("seasonal decor", names)
-        self.assertTrue(all(item["search_volume"] == "Data unavailable" for item in focus["opportunities"]))
+        self.assertTrue(all(item["search_volume"] == "Data unavailable" for item in focus["new_topics"]))
+        self.assertIn("Data unavailable", focus["new_topics_note"])
         self.assertIn("Data unavailable", focus["note"])
 
-    def test_search_console_drives_blog_and_opportunities(self):
+    def test_search_console_drives_blog_and_close_to_ranking(self):
         gsc = {
             "status": "ok",
             "queries": [
@@ -704,17 +738,45 @@ class KeywordFocusTests(unittest.TestCase):
         self.assertEqual(focus["our_blog"][0]["keyword"], "leather placemats")
         self.assertIn("40 clicks", focus["our_blog"][0]["evidence"])
         self.assertNotIn("brand store", [item["keyword"] for item in focus["our_blog"]])
-        self.assertEqual(focus["opportunities"][0]["source"], "search_console")
+        self.assertEqual(focus["close_to_ranking"][0]["source"], "search_console")
+        self.assertTrue(focus["new_topics"])
 
-    def test_real_volume_from_provider_ranks_opportunities(self):
+    def test_real_volume_from_provider_ranks_new_topics(self):
         class Provider:
             def keyword_volume(self, phrase, country):
                 return {"round placemats": 5400}.get(phrase)
 
         focus = keyword_focus("leather placemats", FOCUS_TABLE, None, competitor_total=3, metrics=Provider())
-        self.assertEqual(focus["opportunities"][0]["keyword"], "round placemats")
-        self.assertEqual(focus["opportunities"][0]["search_volume"], 5400)
+        self.assertEqual(focus["new_topics"][0]["keyword"], "round placemats")
+        self.assertEqual(focus["new_topics"][0]["search_volume"], 5400)
+        self.assertEqual(focus["new_topics_basis"], "volume")
         self.assertEqual(focus["opportunities_basis"], "volume")
+
+    def test_new_topics_survive_when_striking_distance_fills_cap(self):
+        table = FOCUS_TABLE + [
+            _row("heat resistant placemats", "missing", comp_count=2, freq=2, rel=0.5),
+            _row("leather placemat care", "missing", comp_count=2, freq=2, rel=0.55),
+        ]
+        gsc = {
+            "status": "ok",
+            "queries": [
+                {"query": "leather placemats", "clicks": 40, "impressions": 900, "position": 4.2},
+                {"query": "leather placemat", "clicks": 1, "impressions": 2000, "position": 12.0},
+                {"query": "best placemats for dining table", "clicks": 2, "impressions": 1500, "position": 14.0},
+                {"query": "cheap vinyl table mats", "clicks": 1, "impressions": 800, "position": 18.0},
+                {"query": "outdoor picnic mats", "clicks": 1, "impressions": 600, "position": 22.0},
+            ],
+        }
+        focus = keyword_focus("leather placemats", table, gsc, competitor_total=3)
+        close_names = [item["keyword"] for item in focus["close_to_ranking"]]
+        topic_names = [item["keyword"] for item in focus["new_topics"]]
+        self.assertGreaterEqual(len(close_names), 3)
+        self.assertTrue(topic_names)
+        self.assertGreaterEqual(len(topic_names), 1)
+        self.assertNotIn("leather placemats", close_names)
+        self.assertNotIn("leather placemat", close_names)
+        self.assertTrue(all(item["source"] == "gap" for item in focus["new_topics"]))
+        self.assertTrue(all(item["source"] == "search_console" for item in focus["close_to_ranking"]))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from acl_agent.scoring import (
     _pack,
     _score_aeo,
     _score_geo,
+    _score_seo,
     score_article,
 )
 
@@ -148,6 +149,20 @@ It depends on how many days you have rather than copying a generic loop.
         self.assertTrue(0 <= report["aio"]["score"] <= 100)
         self.assertTrue(0 <= report["overall"] <= 100)
         self.assertEqual(report["aio"]["max_points"], sum(f["max"] for f in report["aio"]["factors"]))
+
+
+class SeoSplitTests(unittest.TestCase):
+    def test_seo_report_exposes_targeting_and_technical_subscores(self):
+        article = (
+            "# Other title\n\n"
+            "No primary phrase here. " * 40
+            + "\n## One\ntext\n## Two\ntext\n## Three\ntext\n## Four\ntext\n"
+        )
+        report = _score_seo(article, _brief(), _seo())
+        self.assertIn("keyword_targeting_score", report)
+        self.assertIn("onpage_technical_score", report)
+        self.assertLess(report["keyword_targeting_score"], report["onpage_technical_score"])
+        self.assertEqual(report["score"], score_article(article, _brief(), _seo())["seo"]["score"])
 
 
 if __name__ == "__main__":

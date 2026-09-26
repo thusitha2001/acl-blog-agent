@@ -240,12 +240,31 @@
     if (!any) {
       return `<div class="ca-scores"><span class="ca-pill ca-pill-muted"><span>${escapeHtml(reason || scores?.reason || "Data unavailable")}</span></span></div>`;
     }
-    return `<div class="ca-scores">${items.map(([label, value]) => `
-      <span class="ca-pill ca-pill-${label.toLowerCase()}${value == null ? " ca-pill-muted" : ""}">
+    const fallback = scores?.status === "ok" && scores?.confidence === "low";
+    const split = (scores?.keyword_targeting_score != null || scores?.onpage_technical_score != null)
+      ? `<p class="ca-hint">Keyword targeting ${escapeHtml(String(scores.keyword_targeting_score ?? "N/A"))} · On-page technical ${escapeHtml(String(scores.onpage_technical_score ?? "N/A"))}</p>`
+      : "";
+    const pills = items.map(([label, value]) => {
+      const key = label.toLowerCase();
+      const factors = scores?.reports?.[key]?.factors || [];
+      return `<button type="button" class="ca-pill ca-pill-${key}${value == null ? " ca-pill-muted" : ""}" data-score-toggle="${key}" ${factors.length ? "" : "disabled"} aria-expanded="false">
         <strong>${value == null ? "N/A" : escapeHtml(value)}</strong>
-        <span>${label}</span>
-      </span>
-    `).join("")}</div>`;
+        <span>${label}${factors.length ? " ▾" : ""}</span>
+      </button>`;
+    }).join("");
+    const panels = items.map(([label]) => {
+      const key = label.toLowerCase();
+      const factors = scores?.reports?.[key]?.factors || [];
+      if (!factors.length) return "";
+      return `<div class="ca-factors" data-factors="${key}" hidden>
+        ${factors.map((factor) => `
+          <p><strong>${escapeHtml(factor.name || "")}</strong> ${escapeHtml(String(factor.score ?? "—"))}/${escapeHtml(String(factor.max ?? ""))}
+          ${factor.note ? `<span class="ca-hint"> — ${escapeHtml(factor.note)}</span>` : ""}
+          ${!factor.passed && factor.tip ? `<br><span class="ca-hint">${escapeHtml(factor.tip)}</span>` : ""}</p>
+        `).join("")}
+      </div>`;
+    }).join("");
+    return `<div class="ca-scores">${pills}${fallback ? `<span class="ca-tag ca-tag-warn">⚠ fallback scorer used</span>` : ""}${panels}</div>${split}`;
   }
 
   function signalTags(signals) {
@@ -305,6 +324,7 @@
             </div>
             <a class="ca-title" href="${escapeHtml(row.url)}" target="_blank" rel="noopener">${escapeHtml(row.title || "Data unavailable")}</a>
             <p class="ca-meta">${escapeHtml(row.authority)} · ${escapeHtml(formatWords(row.word_count))} · ${escapeHtml(formatUpdated(row.updated))}</p>
+            ${row.vs_you ? `<p class="ca-vs-you">${escapeHtml(row.vs_you)}</p>` : ""}
             <p class="ca-meta">${escapeHtml(row.meta_description && row.meta_description !== "Data unavailable" ? row.meta_description : "Meta description: Data unavailable")}</p>
           </div>
           ${scorePills(row.scores)}
@@ -325,7 +345,7 @@
       console.error("[Competitor Analysis] dashboard render failed", err);
       if (dashEl && dashBody) {
         dashEl.hidden = false;
-        dashBody.innerHTML = "<p class=\"ca-empty\">The ranking table loaded, but the detailed report could not be drawn. Use Export JSON after analyzing again.</p>";
+        dashBody.innerHTML = "<p class=\"ca-empty\">The ranking table loaded, but the detailed report could not be drawn. Re-run the analysis.</p>";
       }
     }
     setRewriteEnabled(true);
@@ -356,7 +376,7 @@
     try {
       const slimCompetitors = (result.competitors || []).map((row) => ({
         ...row,
-        scores: row.scores ? { ...row.scores, reports: undefined } : row.scores,
+        scores: row.scores || {},
       }));
       const slim = { ...result, source_article: "", competitors: slimCompetitors };
       const snapshots = loadSnapshots().filter((item) => item.id !== result.analyzed_at);
@@ -449,10 +469,6 @@
     tableEl.innerHTML = skeletonRows();
     if (yoursEl) yoursEl.hidden = true;
     if (dashEl) dashEl.hidden = true;
-    ["ca-filter-priority"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.value = "";
-    });
 
     const payload = {
       blog_url: blogUrl,
@@ -598,11 +614,17 @@
 
   function keywordFocus(result) {
     const focus = result.keywords?.focus || {};
+    const close = focus.close_to_ranking || [];
+    const topics = focus.new_topics || [];
     return {
       ours: focus.our_blog || [],
       oursBasis: focus.our_blog_basis || "on_page",
       competitors: focus.competitors || [],
-      opportunities: focus.opportunities || [],
+      closeToRanking: close,
+      closeNote: focus.close_to_ranking_note || "",
+      newTopics: topics,
+      newTopicsNote: focus.new_topics_note || "",
+      opportunities: close.length || topics.length ? close.concat(topics) : (focus.opportunities || []),
       note: focus.note || "",
     };
   }
@@ -616,7 +638,7 @@
   }
 
   function focusGroup(title, subtitle, rows, emptyText, showVolume, tag = "") {
-    const headers = showVolume ? ["Keyword", "Why", "Search volume"] : ["Keyword", "Why"];
+    const headers = showVolume ? ["Keyword", "Notes", "Search volume"] : ["Keyword", "Notes"];
     const body = rows.length
       ? tableRows(headers, rows.map((k) => {
         const cells = [escapeHtml(k.keyword), escapeHtml(k.evidence || "")];
@@ -639,7 +661,7 @@
         false,
       )}
       ${focusGroup(
-        "Performing well for competitors",
+        "Topics competitors cover",
         "Used by the most competitor pages you added",
         f.competitors,
         (result.competitors || []).length ? "No shared competitor keywords found." : "Add competitor URLs to see their keywords.",
@@ -647,10 +669,10 @@
         tag,
       )}
       ${focusGroup(
-        "High-potential keywords to target (Recommendation)",
-        f.note || "Ranked by search volume",
-        f.opportunities,
-        "No relevant keyword opportunities found.",
+        "Close to ranking (Recommendation)",
+        f.closeNote || "Queries you already get impressions for but rank below position 10.",
+        f.closeToRanking,
+        "No striking-distance Search Console queries found.",
         true,
         tag,
       )}`;
@@ -683,24 +705,9 @@
       });
     });
     const outline = [];
-    const keyword = String(result.serp_query || result.target_keyword || "").toLowerCase();
-    if (keyword.includes("hoodie") && (keyword.includes("style") || keyword.includes("outfit"))) {
-      outline.push(
-        "What makes an oversized hoodie look stylish?",
-        "Choose the right oversized hoodie fit.",
-        "What to wear with an oversized hoodie.",
-        "Best pants and jeans for oversized hoodies.",
-        "Shoes that work with oversized hoodie outfits.",
-        "Layering ideas for different seasons.",
-        "Casual and streetwear outfit combinations.",
-        "Common styling mistakes to avoid.",
-        "Frequently asked questions."
-      );
-    } else {
-      pageHeadings(result.your_page, false).slice(0, 3).forEach((item) => outline.push(item));
-      if (!outline.length) outline.push("Introduction");
-      rows.slice(0, 8).forEach((row) => outline.push(row.recommended_heading));
-    }
+    pageHeadings(result.your_page, false).slice(0, 3).forEach((item) => outline.push(item));
+    if (!outline.length) outline.push("Introduction");
+    rows.slice(0, 8).forEach((row) => outline.push(row.recommended_heading));
     return {
       table: rows.slice(0, 16),
       recommended_outline: outline.slice(0, 12),
@@ -765,7 +772,7 @@
         severity: "High",
         evidence: "Your extract is " + yourWords + " words vs competitor average " + avgWords + " (on-page extract, not traffic).",
         fix: "Cover missing H2s from the content-gap table with original examples.",
-        impact: "Better intent satisfaction on ranking pages",
+        note: "Better intent satisfaction on ranking pages",
       });
     }
     if (numericScore(yours.seo) != null && numericScore(avg.seo) != null && yours.seo + 8 < avg.seo) {
@@ -774,7 +781,7 @@
         severity: "High",
         evidence: "Your SEO checklist " + yours.seo + " vs competitor average " + avg.seo + ".",
         fix: "Use the SEO factor tips: H1 keyword, headings, FAQs, alt text.",
-        impact: "Improved on-page readiness, not a guaranteed rank lift",
+        note: "Improved on-page readiness, not a guaranteed rank lift",
       });
     }
     const yourH2 = Number(result.your_page?.h2_count) || pageHeadings(result.your_page).length;
@@ -785,7 +792,7 @@
         severity: "Medium",
         evidence: "Your page has " + yourH2 + " H2s vs competitor average " + Math.round(avgH2) + ".",
         fix: "Add H2s for the missing topics in the content-gap table.",
-        impact: "Clearer scan path and snippet potential",
+        note: "Clearer scan path and snippet potential",
       });
     }
     out.push({
@@ -793,7 +800,7 @@
       severity: "Low",
       evidence: "Domain authority, backlinks, referring domains, and Core Web Vitals are Data unavailable (no third-party API).",
       fix: "Pair this checklist with Search Console or a backlink tool you already have access to.",
-      impact: "Unknown here — do not treat on-page scores as traffic.",
+      note: "Unknown here — do not treat on-page scores as traffic.",
     });
     return out;
   }
@@ -866,28 +873,25 @@
     yoursEl.innerHTML = `
       <header class="ca-card-head">
         <div>
-          <h2>Your page vs ranking pages</h2>
-          <p>SERP query: <strong>${escapeHtml(result.serp_query || result.target_keyword || "")}</strong> · ${escapeHtml(avg.sample_note || "")}</p>
+          <h2>Your page</h2>
+          <p>${escapeHtml(result.serp_query || result.target_keyword || "")} · ${escapeHtml(formatWords(page?.word_count))} · ${escapeHtml(String(page?.h2_count ?? "—"))} H2s</p>
         </div>
       </header>
       <div class="ca-yours-grid">
         <div>
-          <p class="ca-kicker">My blog</p>
           ${href ? `<a class="ca-title" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : `<p class="ca-title">${escapeHtml(title)}</p>`}
-          <p class="ca-meta">${escapeHtml(formatWords(page?.word_count))} · H2 ${page?.h2_count ?? "—"} · ${escapeHtml(page?.author && page.author !== "Data unavailable" ? page.author : "Author unavailable")}</p>
         </div>
         <div>
-          <p class="ca-kicker">Your scores</p>
+          <p class="ca-kicker">On-page scores</p>
           ${scorePills(yours, yours.reason)}
         </div>
-        <div>
-          <p class="ca-kicker">Average competitor</p>
+        ${(result.competitors || []).length ? `<div>
+          <p class="ca-kicker">Competitor average</p>
           ${scorePills(avg, avg.reasons?.aio || avg.reasons?.sxo)}
-          <p class="ca-hint">${escapeHtml(avg.sample_note || "")}${avg.aio == null && avg.sxo == null && avg.seo != null ? " · Data unavailable — no AIO/SXO values returned" : ""}</p>
-        </div>
+        </div>` : ""}
       </div>
     `;
-    yoursEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    (dashEl || yoursEl).scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function metricLabel(value, suffix) {
@@ -951,31 +955,89 @@
       <p class="ca-hint">Compared with the equal-length period before the range you chose. Numbers are Search Console counts, not estimates.</p>`;
   }
 
+  function renderQueryOpportunities(report) {
+    if (!report) return "";
+    const block = (title, rows) => `<h5>${escapeHtml(title)}</h5>${
+      (rows || []).length
+        ? tableRows(["Query", "Position", "Impressions"], rows.map((row) => [
+          escapeHtml(row.query || ""),
+          escapeHtml(String(row.position ?? "")),
+          escapeHtml(String(row.impressions ?? "Data unavailable")),
+        ]))
+        : `<p class="ca-empty">None in this band.</p>`
+    }`;
+    return `${block("Quick wins (position 4–10)", report.quick_wins)}
+      ${block("Page-two opportunities (11–20)", report.page_two)}
+      ${block("Content opportunities (21–50)", report.content)}
+      <p class="ca-hint">${escapeHtml(report.note || "Current Search Console positions, not a traffic forecast.")}</p>`;
+  }
+
+  function renderCtrChecklist(report) {
+    if (!report || report.status === "unavailable") return "";
+    if (report.status !== "gap") {
+      return report.observed ? `<h5>CTR</h5><p>${escapeHtml(report.observed)}</p><p class="ca-hint">${escapeHtml(report.note || "")}</p>` : "";
+    }
+    return `<h5>CTR checklist</h5>
+      <p>${escapeHtml(report.observed || "")}</p>
+      <ul>${(report.possible_checks || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      <p class="ca-hint">${escapeHtml(report.note || "")}</p>`;
+  }
+
+  function renderCopyDraft(block, label) {
+    if (!block || !block.recommended) return "";
+    return `<div class="ca-llm-draft">
+      <p class="ca-kicker">${escapeHtml(label)}</p>
+      <p class="ca-hint">Now: ${escapeHtml(block.current || "—")}</p>
+      <p><strong>${escapeHtml(block.recommended)}</strong></p>
+    </div>`;
+  }
+
+  function renderLlmAdvice(advice) {
+    if (!advice) return "";
+    if (advice.status !== "ok") {
+      return advice.reason
+        ? `<p class="ca-hint">Recommendation model unavailable: ${escapeHtml(advice.reason)}</p>`
+        : "";
+    }
+    const steps = advice.next_steps || [];
+    return `<article class="ca-llm-advice">
+      <p class="ca-kicker">Recommendation</p>
+      ${advice.editor_summary ? `<p>${escapeHtml(advice.editor_summary)}</p>` : ""}
+      <div class="ca-llm-drafts">
+        ${renderCopyDraft(advice.title, "Title")}
+        ${renderCopyDraft(advice.h1, "H1")}
+        ${renderCopyDraft(advice.meta_description, "Meta")}
+      </div>
+      ${steps.length ? `<ol>${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
+    </article>`;
+  }
+
+  function renderIndexStatus(result) {
+    const report = result?.index_status || result?.gsc_diagnosis?.index_status;
+    if (!report) return "";
+    const tone = report.indexed === true ? "good" : report.indexed === false ? "warn" : "";
+    const sourceLabel = report.source === "url_inspection"
+      ? "URL Inspection"
+      : report.source === "robots_only"
+        ? "Robots only"
+        : "Not verified";
+    const bits = [];
+    if (report.coverage_state) bits.push(`Coverage: ${report.coverage_state}`);
+    if (report.last_crawl) bits.push(`Last crawl: ${report.last_crawl}`);
+    if (report.indexing_state) bits.push(`Indexing state: ${report.indexing_state}`);
+    return `<article class="ca-index-status${tone ? ` ca-index-${tone}` : ""}">
+      <p class="ca-kicker">Google index</p>
+      <p><strong>${escapeHtml(report.label || "Inspection unavailable")}</strong>
+        <span class="ca-tag${tone ? ` ca-tag-${tone}` : ""}">${escapeHtml(sourceLabel)}</span></p>
+      ${bits.length ? `<p class="ca-hint">${escapeHtml(bits.join(" · "))}</p>` : ""}
+      <p class="ca-hint">${escapeHtml(report.note || "")}</p>
+      ${report.impressions_hint ? `<p class="ca-hint">${escapeHtml(report.impressions_hint)}</p>` : ""}
+    </article>`;
+  }
+
   function renderDiagnosis(result) {
-    const summary = result.diagnosis_summary || {};
     const gsc = result.gsc_diagnosis || {};
-    const targeting = gsc.keyword_targeting || {};
-    const parts = [];
-    if (summary.text) {
-      parts.push(`<article class="ca-diagnosis ca-diagnosis-${escapeHtml(summary.confidence || "medium")}">
-        <p class="ca-kicker">Most likely traffic reason · ${escapeHtml(summary.confidence || "medium")} confidence</p>
-        <p>${escapeHtml(summary.text)}</p>
-      </article>`);
-    }
-    const mismatch = result.keyword_mismatch;
-    if (mismatch && !mismatch.confirmed) {
-      parts.push(`<article class="ca-mismatch">
-        <p><strong>Choose your target keyword first.</strong> Your traffic mostly comes from “${escapeHtml(mismatch.search_console_query)}”, but this report was measured against “${escapeHtml(mismatch.target_keyword)}”. Keyword and content-gap items marked <span class="ca-tag ca-tag-warn">Depends on keyword choice</span> may target the wrong keyword.</p>
-        <div class="ca-mismatch-actions">
-          <button type="button" class="ca-export-btn" data-mismatch="rerun">Re-run with “${escapeHtml(mismatch.search_console_query)}”</button>
-          <button type="button" class="ca-export-btn" data-mismatch="keep">Keep “${escapeHtml(mismatch.target_keyword)}”</button>
-        </div>
-      </article>`);
-    } else if (mismatch) {
-      parts.push(`<p class="ca-hint">Target confirmed: “${escapeHtml(mismatch.target_keyword)}” (Search Console’s top query is “${escapeHtml(mismatch.search_console_query)}”).</p>`);
-    } else if (targeting.mismatch && targeting.primary_ranking_query) {
-      parts.push(`<p class="ca-serp-insight"><strong>Keyword mismatch.</strong> Search Console’s strongest query is “${escapeHtml(targeting.primary_ranking_query)}”; this analysis scored on-page placement against “${escapeHtml(targeting.target_keyword || result.serp_query || "")}”.</p>`);
-    }
+    const parts = [renderIndexStatus(result)];
     const period = result.diagnosis_window || gsc.period || {};
     const periodLabel = period.label || (period.months ? `Last ${period.months} month${period.months === 1 ? "" : "s"}` : "");
     if (gsc.status === "ok") {
@@ -1035,9 +1097,7 @@
     }
     dashEl.hidden = false;
     const yours = result.your_scores || result.old_scores || {};
-    const pri = document.getElementById("ca-filter-priority")?.value || "";
-    let plan = Array.isArray(result.action_plan) ? result.action_plan : (result.action_plan_report?.items || []);
-    if (pri) plan = plan.filter((p) => p.priority === pri);
+    const plan = Array.isArray(result.action_plan) ? result.action_plan : (result.action_plan_report?.items || []);
     const focus = keywordFocus(result);
     const pending = keywordChoicePending(result);
     const gaps = deriveContentGaps(result);
@@ -1047,7 +1107,7 @@
     const insights = result.serp_insights || [];
     console.log("[Competitor Analysis] dashboard sections", {
       factors: Object.keys(yours.reports || yours.scores || {}),
-      keywords: focus.ours.length + focus.competitors.length + focus.opportunities.length,
+      keywords: focus.ours.length + focus.competitors.length + focus.closeToRanking.length + focus.newTopics.length,
       gaps: (gaps.table || []).length,
       outline: (gaps.recommended_outline || []).length,
       citations: citations.length,
@@ -1055,95 +1115,640 @@
       readability: readability.score,
     });
 
+    const verdict = result.verdict || {};
+    const gsc = result.gsc_diagnosis || {};
+    const period = result.diagnosis_window || gsc.period || {};
+    const addRows = (result.what_to_add && result.what_to_add.table) || [];
+    const topPlan = plan.slice(0, 6);
+    const morePlan = plan.slice(6);
+    const fixList = (rows) => rows.length
+      ? `<ol class="ca-fix-list">${rows.map((p) => `
+          <li>
+            <span class="ca-fix-cat">${escapeHtml(p.category || "Fix")}</span>
+            <p>${escapeHtml(p.recommended_action || p.issue || "")}${dependsTag(pending && p.depends_on_keyword)}</p>
+          </li>`).join("")}</ol>`
+      : "";
+    const mismatchBlock = (() => {
+      const mismatch = result.keyword_mismatch;
+      const targeting = (result.gsc_diagnosis || {}).keyword_targeting || {};
+      if (mismatch && !mismatch.confirmed) {
+        return `<article class="ca-mismatch">
+          <p><strong>Choose your target keyword first.</strong> Your traffic mostly comes from “${escapeHtml(mismatch.search_console_query)}”, but this report was measured against “${escapeHtml(mismatch.target_keyword)}”. Keyword and content-gap items marked <span class="ca-tag ca-tag-warn">Depends on keyword choice</span> may target the wrong keyword.</p>
+          <div class="ca-mismatch-actions">
+            <button type="button" class="ca-export-btn" data-mismatch="rerun">Re-run with “${escapeHtml(mismatch.search_console_query)}”</button>
+            <button type="button" class="ca-export-btn" data-mismatch="keep">Keep “${escapeHtml(mismatch.target_keyword)}”</button>
+          </div>
+        </article>`;
+      }
+      if (mismatch) {
+        return `<p class="ca-hint">Target confirmed: “${escapeHtml(mismatch.target_keyword)}” (Search Console’s top query is “${escapeHtml(mismatch.search_console_query)}”).</p>`;
+      }
+      if (targeting.mismatch && targeting.primary_ranking_query) {
+        return `<p class="ca-serp-insight"><strong>Keyword mismatch.</strong> Search Console’s strongest query is “${escapeHtml(targeting.primary_ranking_query)}”; this analysis scored on-page placement against “${escapeHtml(targeting.target_keyword || result.serp_query || "")}”.</p>`;
+      }
+      return "";
+    })();
+
+    const ctrLabel = gsc.ctr == null ? "Data unavailable" : `${Math.round(Number(gsc.ctr) * 1000) / 10}%`;
+    const posLabel = gsc.position == null ? "Data unavailable" : Number(gsc.position).toFixed(1);
     dashBody.innerHTML = `
-      ${renderDiagnosis(result)}
-      ${insights.map((item) => `<p class="ca-serp-insight">${escapeHtml(item)}</p>`).join("")}
-      <p class="ca-hint">Mode ${escapeHtml(result.analysis_mode || "")} · blog ${escapeHtml(result.blog_url_status || "")} · keyword source ${escapeHtml(result.target_keyword_source || "")} · query ${escapeHtml(result.serp_query || "")}</p>
-      <h3>Keyword comparison</h3>
-      ${renderKeywordFocus(result)}
-      <h3>Content gaps${dependsTag(pending)}</h3>
-      ${(gaps.table || []).length ? tableRows(["Missing topic","Covered by","Importance","Intent"],
-        (gaps.table || []).map((g) => [
-          escapeHtml(g.missing_topic), escapeHtml(g.covered_by), escapeHtml(g.importance),
-          escapeHtml(g.search_intent || g.intent || "")
-        ])) : `<p class="ca-empty">${escapeHtml(gaps.reason || result.content_gaps?.reason || "No missing competitor headings were found.")}</p>`}
-      <h3>AI citation opportunities</h3>
-      ${citations.length ? tableRows(["Question","Status","Format","Location","Evidence"],
-        citations.map((c) => [
-          escapeHtml(c.keyword_or_question), escapeHtml(c.status), escapeHtml(c.format),
-          escapeHtml(c.location), escapeHtml(c.required_evidence)
-        ])) : `<p class="ca-empty">${escapeHtml(result.citations?.reason || "No citation opportunities yet.")}</p>`}
-      <h3>Images &amp; alt text</h3>
-      ${renderImages(result.images)}
-      <h3>Why competitors may outperform</h3>
-      ${traffic.length ? traffic.map((r) => `<article class="ca-reason"><strong>${escapeHtml(r.reason)}</strong> · ${escapeHtml(r.severity)}<p>${escapeHtml(r.evidence)}</p><p>Fix: ${escapeHtml(r.fix)} · Impact: ${escapeHtml(r.impact)}</p></article>`).join("") : `<p class="ca-empty">${escapeHtml(result.traffic?.reason || "No traffic comparison yet.")}</p>`}
-      <p class="ca-hint">${escapeHtml(result.traffic?.disclaimer || "These are possible on-page disadvantages, not verified traffic.")}</p>
-      <h3>Readability</h3>
-      <p>${readability.status === "unavailable" ? escapeHtml(readability.reason || "Readability unavailable") : `Score ${scoreNum(readability.score)} · ${escapeHtml(readability.interpretation || "")} · Flesch ${scoreNum(readability.flesch_reading_ease)} · Grade ${scoreNum(readability.flesch_kincaid_grade)}`}</p>
-      ${readability.avg_sentence_length ? `<p class="ca-hint">Average sentence length ${escapeHtml(readability.avg_sentence_length)} words.</p>` : ""}
-      <h3>Humanization</h3>
-      <p>${result.humanization?.status === "unavailable" ? escapeHtml(result.humanization?.reason || "Humanization unavailable") : `Score ${scoreNum(result.humanization?.score)} · ${escapeHtml(result.humanization?.interpretation || "")}`}</p>
-      <p>${(result.humanization?.ai_like_phrases || []).map((p) => `<span class="ca-tag">${escapeHtml(p)}</span>`).join(" ")}</p>
-      <h3>Action plan</h3>
-      ${plan.length ? tableRows(["Priority","Category","Issue","Action","Impact","Effort"],
-        plan.map((p) => [
-          escapeHtml(p.priority), escapeHtml(p.category), escapeHtml(p.issue) + dependsTag(pending && p.depends_on_keyword),
-          escapeHtml(p.recommended_action), escapeHtml(p.estimated_impact), escapeHtml(p.estimated_effort)
-        ])) : sectionNote(result.action_plan_report, `<p class="ca-empty">No actions generated.</p>`)}
+      <section class="ca-section">
+        <h3>What's happening</h3>
+        ${renderIndexStatus(result)}
+        ${gsc.status === "ok" ? `<div class="ca-stat-row">
+          <div class="ca-stat"><span>Clicks${period.label ? ` · ${escapeHtml(period.label)}` : ""}</span><strong>${escapeHtml(metricLabel(gsc.clicks))}</strong></div>
+          <div class="ca-stat"><span>Impressions</span><strong>${escapeHtml(metricLabel(gsc.impressions))}</strong></div>
+          <div class="ca-stat"><span>CTR</span><strong>${escapeHtml(ctrLabel)}</strong></div>
+          <div class="ca-stat"><span>Avg position</span><strong>${escapeHtml(posLabel)}</strong></div>
+        </div>` : `<p class="ca-empty">${escapeHtml(gsc.reason || "Search Console numbers are Data unavailable.")}</p>`}
+        <ul class="ca-plain">${(verdict.observed || [verdict.text || result.diagnosis_summary?.text || "No status is available for this run."]).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+        ${(verdict.areas_to_check || []).length ? `<p class="ca-hint">Also check: ${escapeHtml((verdict.areas_to_check || []).join(" · "))}</p>` : ""}
+      </section>
+      ${mismatchBlock}
+      <section class="ca-section">
+        <h3>What to fix</h3>
+        ${topPlan.length ? fixList(topPlan) : sectionNote(result.action_plan_report, `<p class="ca-empty">No actions on this run.</p>`)}
+        ${morePlan.length ? `<details class="ca-fold"><summary>Show ${morePlan.length} more</summary>${fixList(morePlan)}</details>` : ""}
+      </section>
+      <section class="ca-section">
+        <h3>Recommended copy</h3>
+        ${renderLlmAdvice(result.llm_advice) || `<p class="ca-empty">No copy drafts on this run.</p>`}
+      </section>
+      <section class="ca-section">
+        <h3>Topics to add${dependsTag(pending)}</h3>
+        ${addRows.length ? `<ol class="ca-topic-list">${addRows.slice(0, 10).map((row) => `<li>${escapeHtml(row.topic)}</li>`).join("")}</ol>` : `<p class="ca-empty">${escapeHtml(result.what_to_add?.note || gaps.reason || result.content_gaps?.reason || "No missing topics found.")}</p>`}
+      </section>
+      <details class="ca-fold">
+        <summary>Search Console details</summary>
+        ${renderDiagnosis(result)}
+        ${insights.map((item) => `<p class="ca-serp-insight">${escapeHtml(item)}</p>`).join("")}
+        <h4>Query opportunities</h4>
+        ${renderQueryOpportunities(result.query_opportunities)}
+        ${renderCtrChecklist(result.ctr_checklist)}
+        <h4>Keywords</h4>
+        ${renderKeywordFocus(result)}
+      </details>
+      <details class="ca-fold">
+        <summary>Images and readability</summary>
+        <h4>Images &amp; alt text</h4>
+        ${renderImages(result.images)}
+        <h4>Readability</h4>
+        <p>${readability.status === "unavailable" ? escapeHtml(readability.reason || "Readability unavailable") : `${escapeHtml(readability.interpretation || "")} · Flesch ${scoreNum(readability.flesch_reading_ease)}`}</p>
+        ${citations.length ? `<h4>Citation opportunities</h4>${tableRows(["Question","Status"], citations.map((c) => [escapeHtml(c.keyword_or_question), escapeHtml(c.status)]))}` : ""}
+        ${traffic.length ? `<h4>On-page gaps vs competitors</h4>${traffic.map((r) => `<p>${escapeHtml(r.reason)} — ${escapeHtml(r.fix)}</p>`).join("")}` : ""}
+      </details>
     `;
   }
 
-  function downloadFile(name, text, type) {
-    const blob = new Blob([text], { type });
-    const href = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = href;
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(href);
+  function ctrPct(value) {
+    if (value == null || value === "") return "Data unavailable";
+    const n = Number(value);
+    return Number.isFinite(n) ? `${Math.round(n * 1000) / 10}%` : "Data unavailable";
   }
 
-  function exportReport(kind) {
-    if (!currentResult) return;
-    const result = currentResult;
-    const stamp = (result.target_keyword || "report").replace(/\s+/g, "-").slice(0, 40);
-    if (kind === "json") {
-      const copy = { ...result, source_article: "" };
-      downloadFile(stamp + ".json", JSON.stringify(copy, null, 2), "application/json");
-      return;
+  function posLabel(value) {
+    if (value == null || value === "") return "Data unavailable";
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(1) : String(value);
+  }
+
+  function scoreLine(scores) {
+    return ["seo", "geo", "aeo", "aio", "sxo"].map((key) => {
+      const n = numericScore(scores?.[key]);
+      return `${key.toUpperCase()} ${n == null ? "N/A" : n}`;
+    }).join("  ·  ");
+  }
+
+  function pdfFilename(result) {
+    const kw = String(result.target_keyword || result.serp_query || "report")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "report";
+    const when = String(result.analyzed_at || "").slice(0, 10) || new Date().toISOString().slice(0, 10);
+    return `competitor-analysis-${kw}-${when}.pdf`;
+  }
+
+  function createPdfWriter() {
+    const JsPDF = window.jspdf && window.jspdf.jsPDF;
+    if (!JsPDF) throw new Error("PDF library failed to load. Refresh the page and try again.");
+    const doc = new JsPDF({ unit: "mm", format: "a4", compress: true });
+    const pageW = 210;
+    const pageH = 297;
+    const L = 15;
+    const R = 15;
+    const T = 16;
+    const B = 18;
+    const W = pageW - L - R;
+    let y = T;
+    const ink = [28, 28, 36];
+    const muted = [100, 102, 114];
+    const brand = [30, 64, 175];
+    const rule = [226, 228, 235];
+
+    function need(h) {
+      if (y + h <= pageH - B) return false;
+      doc.addPage();
+      y = T;
+      return true;
     }
-    if (kind === "csv") {
-      const rows = [["group","keyword","why","search_volume"]];
-      const f = keywordFocus(result);
-      [["your_blog", f.ours], ["competitors", f.competitors], ["opportunity", f.opportunities]].forEach(([group, list]) => {
-        list.forEach((k) => rows.push([group, k.keyword, k.evidence || "", k.search_volume ?? "Data unavailable"]));
+
+    function wrap(str, width) {
+      return doc.splitTextToSize(String(str || "").replace(/\s+/g, " ").trim() || "—", width || W);
+    }
+
+    function writeLines(lines, size, style, color, extraGap) {
+      const lh = size * 0.42;
+      doc.setFont("helvetica", style);
+      doc.setFontSize(size);
+      doc.setTextColor(color[0], color[1], color[2]);
+      lines.forEach((ln) => {
+        need(lh + 1);
+        doc.text(ln, L, y);
+        y += lh;
       });
-      downloadFile(stamp + "-keywords.csv", rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv");
+      y += extraGap == null ? 2.2 : extraGap;
+    }
+
+    function h1(str) { writeLines(wrap(str), 18, "bold", ink, 2); }
+    function h2(str) {
+      need(14);
+      y += 3;
+      writeLines(wrap(str), 13, "bold", brand, 1.2);
+      doc.setDrawColor(rule[0], rule[1], rule[2]);
+      doc.setLineWidth(0.3);
+      doc.line(L, y, L + W, y);
+      y += 3.4;
+    }
+    function h3(str) { writeLines(wrap(str), 11, "bold", ink, 1.8); }
+    function p(str) { if (str) writeLines(wrap(str), 10, "normal", ink, 2.4); }
+    function note(str) { if (str) writeLines(wrap(str), 9, "italic", muted, 2.2); }
+    function item(n, str) {
+      writeLines(wrap((n == null ? "•  " : `${n}.  `) + str, W - 2), 10, "normal", ink, 1.8);
+    }
+
+    function kv(label, value) {
+      const labelW = 42;
+      const lines = wrap(value, W - labelW);
+      const lh = 4.2;
+      need(Math.max(5.2, lines.length * lh));
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.setTextColor(muted[0], muted[1], muted[2]);
+      doc.text(String(label).toUpperCase(), L, y);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(ink[0], ink[1], ink[2]);
+      lines.forEach((ln) => {
+        need(lh);
+        doc.text(ln, L + labelW, y);
+        y += lh;
+      });
+      y += 1.2;
+    }
+
+    function table(headers, rows) {
+      if (!rows.length) {
+        note("None on this run.");
+        return;
+      }
+      const n = headers.length;
+      const widths = n === 2 ? [W * 0.36, W * 0.64]
+        : n === 3 ? [W * 0.48, W * 0.26, W * 0.26]
+        : n === 4 ? [W * 0.36, W * 0.16, W * 0.16, W * 0.32]
+        : n === 5 ? [W * 0.30, W * 0.14, W * 0.16, W * 0.12, W * 0.28]
+        : Array.from({ length: n }, () => W / n);
+
+      function drawHeader() {
+        const wrapped = headers.map((h, i) => doc.splitTextToSize(String(h), widths[i] - 2.4));
+        const lh = 3.5;
+        const h = Math.max(...wrapped.map((part) => part.length)) * lh + 3;
+        need(h + 2);
+        doc.setFillColor(244, 245, 249);
+        doc.rect(L, y - 3.6, W, h, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(8);
+        doc.setTextColor(muted[0], muted[1], muted[2]);
+        let x = L;
+        wrapped.forEach((lines, i) => {
+          doc.text(lines, x + 1.2, y);
+          x += widths[i];
+        });
+        y += h;
+      }
+
+      drawHeader();
+      rows.forEach((row) => {
+        const wrapped = row.map((cell, i) => doc.splitTextToSize(String(cell ?? "—"), widths[i] - 2.4));
+        const lh = 3.6;
+        const h = Math.max(...wrapped.map((part) => part.length)) * lh + 2.4;
+        if (need(h + 1)) drawHeader();
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8.5);
+        doc.setTextColor(ink[0], ink[1], ink[2]);
+        let x = L;
+        wrapped.forEach((lines, i) => {
+          doc.text(lines, x + 1.2, y);
+          x += widths[i];
+        });
+        y += h;
+        doc.setDrawColor(236, 237, 242);
+        doc.setLineWidth(0.2);
+        doc.line(L, y - 1, L + W, y - 1);
+      });
+      y += 2.5;
+    }
+
+    function finish(filename) {
+      const pages = doc.getNumberOfPages();
+      for (let i = 1; i <= pages; i += 1) {
+        doc.setPage(i);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(muted[0], muted[1], muted[2]);
+        doc.text("Blog Agent  ·  Competitor analysis", L, pageH - 8);
+        doc.text(`${i} / ${pages}`, pageW - R, pageH - 8, { align: "right" });
+      }
+      doc.save(filename);
+    }
+
+    return { h1, h2, h3, p, note, item, kv, table, finish };
+  }
+
+  function writeScoreFactors(pdf, scores) {
+    ["seo", "geo", "aeo", "aio", "sxo"].forEach((key) => {
+      const factors = scores?.reports?.[key]?.factors || [];
+      if (!factors.length) return;
+      pdf.h3(`${key.toUpperCase()} checks`);
+      factors.forEach((factor) => {
+        const bits = [`${factor.name || "Check"}: ${factor.score ?? "—"}/${factor.max ?? ""}`];
+        if (factor.note) bits.push(factor.note);
+        if (!factor.passed && factor.tip) bits.push(factor.tip);
+        pdf.item(null, bits.join(" — "));
+      });
+    });
+  }
+
+  function writeKeywordGroup(pdf, title, subtitle, rows, empty, showVolume) {
+    pdf.h3(title);
+    pdf.note(subtitle);
+    if (!(rows || []).length) {
+      pdf.p(empty);
       return;
     }
-    if (kind === "md") {
-      const md = [
-        `# Competitor analysis: ${result.target_keyword || ""}`,
-        "",
-        `Country: ${result.country || "us"} · Language: ${result.language || "en"}`,
-        "",
-        "## Scores",
-        JSON.stringify(result.your_scores, null, 2),
-        "",
-        "## Action plan",
-        ...(result.action_plan || []).map((p) => `- **${p.priority}** (${p.category}): ${p.issue} — ${p.recommended_action}`),
-        "",
-        result.traffic?.disclaimer || "",
-      ].join("\n");
-      downloadFile(stamp + ".md", md, "text/markdown");
+    const headers = showVolume ? ["Keyword", "Notes", "Search volume"] : ["Keyword", "Notes"];
+    pdf.table(headers, rows.map((row) => {
+      const cells = [row.keyword || "", row.evidence || ""];
+      if (showVolume) cells.push(String(row.search_volume ?? "Data unavailable"));
+      return cells;
+    }));
+  }
+
+  function writeAnalysisPdf(result) {
+    const pdf = createPdfWriter();
+    const page = result.your_page || {};
+    const gsc = result.gsc_diagnosis || {};
+    const period = result.diagnosis_window || gsc.period || {};
+    const index = result.index_status || gsc.index_status || {};
+    const verdict = result.verdict || {};
+    const advice = result.llm_advice || {};
+    const plan = Array.isArray(result.action_plan) ? result.action_plan : (result.action_plan_report?.items || []);
+    const wins = result.quick_wins || [];
+    const topics = (result.what_to_add && result.what_to_add.table) || [];
+    const queries = gsc.queries || [];
+    const losses = (gsc.query_losses && gsc.query_losses.items) || [];
+    const comps = gsc.comparisons || result.comparisons || {};
+    const competitors = result.competitors || [];
+    const yours = result.your_scores || result.old_scores || {};
+    const avg = competitorAverages(result);
+    const focus = keywordFocus(result);
+    const pending = keywordChoicePending(result);
+    const readability = deriveReadability(result);
+    const citations = deriveCitations(result);
+    const traffic = deriveTraffic(result);
+    const title = page.title || result.source_title || result.target_keyword || "Page report";
+
+    pdf.h1("Competitor analysis report");
+    pdf.note("Blog Agent");
+    pdf.p(title);
+    pdf.kv("Page", page.url || result.blog_url || "Not submitted");
+    pdf.kv("Target keyword", result.target_keyword || result.serp_query || "—");
+    pdf.kv("Prepared", formatWhen(result.analyzed_at));
+    pdf.kv("Range", `${period.label || "Last 6 months"}${period.start && period.end ? ` · ${period.start} to ${period.end}` : ""}`);
+
+    pdf.h2("1. What's happening");
+    if (index.label) {
+      const source = index.source === "url_inspection"
+        ? "URL Inspection"
+        : index.source === "robots_only"
+          ? "Robots only — not a Google index check"
+          : "Not verified";
+      pdf.p(`Google index: ${index.label}${index.coverage_state ? ` — ${index.coverage_state}` : ""} (${source})`);
+      if (index.last_crawl) pdf.p(`Last crawl: ${index.last_crawl}`);
+      if (index.indexing_state) pdf.p(`Indexing state: ${index.indexing_state}`);
+      pdf.note(index.note);
+      if (index.impressions_hint) pdf.note(index.impressions_hint);
+    } else {
+      pdf.p("Inspection unavailable.");
+    }
+    if (gsc.status === "ok") {
+      pdf.p(`Search Console ${period.label || "this period"}: ${metricLabel(gsc.clicks)} clicks · ${metricLabel(gsc.impressions)} impressions · CTR ${ctrPct(gsc.ctr)} · avg position ${posLabel(gsc.position)}`);
+    } else {
+      pdf.p(gsc.reason || "Search Console numbers are Data unavailable.");
+    }
+    (verdict.observed || [verdict.text || result.diagnosis_summary?.text || "No status is available for this run."]).forEach((line, i) => {
+      pdf.item(i + 1, line);
+    });
+    if ((verdict.areas_to_check || []).length) {
+      pdf.p(`Also check: ${verdict.areas_to_check.join(" · ")}`);
+    }
+
+    const mismatch = result.keyword_mismatch;
+    const targeting = gsc.keyword_targeting || {};
+    if (mismatch && !mismatch.confirmed) {
+      pdf.p(`Choose your target keyword first. Search Console traffic mostly comes from “${mismatch.search_console_query}”, but this report was measured against “${mismatch.target_keyword}”.`);
+    } else if (mismatch) {
+      pdf.note(`Target confirmed: “${mismatch.target_keyword}” (Search Console’s top query is “${mismatch.search_console_query}”).`);
+    } else if (targeting.mismatch && targeting.primary_ranking_query) {
+      pdf.p(`Keyword mismatch. Search Console’s strongest query is “${targeting.primary_ranking_query}”; this analysis scored on-page placement against “${targeting.target_keyword || result.serp_query || ""}”.`);
+    }
+
+    pdf.h2("2. What to fix");
+    if (wins.length) {
+      pdf.h3("Start here");
+      wins.forEach((item, i) => {
+        const dep = pending && item.depends_on_keyword ? " (Depends on keyword choice)" : "";
+        pdf.item(i + 1, `${item.category || "Fix"} — ${item.recommended_action || item.issue || ""}${dep}`);
+      });
+    }
+    if (plan.length) {
+      if (wins.length) pdf.h3("Full action list");
+      plan.forEach((item, i) => {
+        const dep = pending && item.depends_on_keyword ? " (Depends on keyword choice)" : "";
+        pdf.item(i + 1, `${item.category || "Fix"} — ${item.recommended_action || item.issue || ""}${dep}`);
+      });
+    }
+    if (!wins.length && !plan.length) {
+      pdf.p(result.action_plan_report?.reason || "No actions on this run.");
+    }
+
+    pdf.h2("3. Recommended copy");
+    pdf.note("Draft copy only. It is not a measured ranking change.");
+    if (advice.status === "ok") {
+      if (advice.editor_summary) pdf.p(`Recommendation. ${advice.editor_summary}`);
+      [["title", "Title"], ["h1", "H1"], ["meta_description", "Meta"]].forEach(([key, label]) => {
+        const block = advice[key] || {};
+        const current = block.current || (key === "title" ? page.title : key === "h1" ? (page.h1 || headingList(page.h1_headings)[0]) : page.meta_description) || "—";
+        pdf.h3(label);
+        pdf.p(`Now: ${current || "—"}`);
+        pdf.p(`Recommended: ${block.recommended || "No draft on this run"}`);
+      });
+      (advice.next_steps || []).forEach((step, i) => pdf.item(i + 1, step));
+    } else {
+      pdf.p(advice.reason ? `Recommendation model unavailable: ${advice.reason}` : "No copy drafts on this run.");
+    }
+
+    pdf.h2(`4. Topics to add${pending ? " (Depends on keyword choice)" : ""}`);
+    if (topics.length) topics.forEach((row, i) => pdf.item(i + 1, row.topic || ""));
+    else pdf.p(result.what_to_add?.note || "No missing topics found.");
+
+    pdf.h2("5. Search Console details");
+    if (gsc.status === "ok") {
+      if (comps.current || comps.previous || comps.year_ago) {
+        pdf.h3("Period comparison");
+        ["current", "previous", "year_ago"].forEach((key) => {
+          const row = comps[key];
+          if (!row) return;
+          const dates = [row.start, row.end].filter(Boolean).join(" to ");
+          if (row.status && row.status !== "ok") {
+            pdf.p(`${row.label || key}${dates ? ` (${dates})` : ""}: ${row.reason || "Data unavailable"}`);
+            return;
+          }
+          const change = row.impressions_delta_pct == null ? "" : ` · vs this period ${deltaLabel(row.impressions_delta_pct)}`;
+          pdf.p(`${row.label || key}${dates ? ` (${dates})` : ""}: clicks ${metricLabel(row.clicks)} · impressions ${metricLabel(row.impressions)}${change} · CTR ${ctrPct(row.ctr)} · avg position ${posLabel(row.position)}`);
+        });
+      }
+      pdf.h3("Queries");
+      if (queries.length) {
+        pdf.table(
+          ["Query", "Clicks", "Impressions", "CTR", "Position"],
+          queries.map((row) => [row.query || "", metricLabel(row.clicks), metricLabel(row.impressions), ctrPct(row.ctr), posLabel(row.position)]),
+        );
+      } else {
+        pdf.p("No query rows for this window.");
+      }
+      pdf.h3("Queries that lost visibility");
+      if (gsc.query_losses && gsc.query_losses.status && gsc.query_losses.status !== "ok") {
+        pdf.p(gsc.query_losses.reason || "Data unavailable");
+      } else if (losses.length) {
+        pdf.table(
+          ["Query", "This period", "Previous", "Change", "What changed"],
+          losses.map((row) => [
+            row.query || "",
+            String(row.impressions ?? ""),
+            String(row.previous_impressions ?? ""),
+            String(row.impressions_delta ?? ""),
+            lossKindLabel(row.kind),
+          ]),
+        );
+        pdf.note("Compared with the equal-length period before the range you chose. Numbers are Search Console counts, not estimates.");
+      } else {
+        pdf.p("No query losses in this window.");
+      }
+      const qo = result.query_opportunities;
+      if (qo) {
+        [
+          ["Quick wins (position 4–10)", qo.quick_wins],
+          ["Page-two opportunities (11–20)", qo.page_two],
+          ["Content opportunities (21–50)", qo.content],
+        ].forEach(([label, rows]) => {
+          pdf.h3(label);
+          if ((rows || []).length) {
+            pdf.table(["Query", "Position", "Impressions"], rows.map((row) => [row.query || "", posLabel(row.position), metricLabel(row.impressions)]));
+          } else {
+            pdf.note("None in this band.");
+          }
+        });
+        pdf.note(qo.note || "");
+      }
+      const ctr = result.ctr_checklist;
+      if (ctr && ctr.status !== "unavailable") {
+        pdf.h3("CTR");
+        pdf.p(ctr.observed || "");
+        (ctr.possible_checks || []).forEach((item) => pdf.item(null, item));
+        pdf.note(ctr.note || "");
+      }
+    } else {
+      pdf.p(gsc.reason || "Search Console is not connected for this URL.");
+    }
+    (result.serp_insights || []).forEach((item) => pdf.p(item));
+
+    pdf.h2("6. Keywords");
+    writeKeywordGroup(
+      pdf,
+      "Performing well for your blog",
+      focus.oursBasis === "search_console"
+        ? "Top page-one Search Console queries by clicks"
+        : "No Search Console data: ranked by how strongly your page uses them, not by traffic",
+      focus.ours,
+      result.your_page ? "No strong keywords found on your page." : "Add a blog URL to see your keywords.",
+      false,
+    );
+    writeKeywordGroup(
+      pdf,
+      `Topics competitors cover${pending ? " — Depends on keyword choice" : ""}`,
+      "Used by the most competitor pages you added",
+      focus.competitors,
+      competitors.length ? "No shared competitor keywords found." : "Add competitor URLs to see their keywords.",
+      false,
+    );
+    writeKeywordGroup(
+      pdf,
+      `Close to ranking (Recommendation)${pending ? " — Depends on keyword choice" : ""}`,
+      focus.closeNote || "Queries you already get impressions for but rank below position 10.",
+      focus.closeToRanking,
+      "No striking-distance Search Console queries found.",
+      true,
+    );
+    if (focus.newTopics.length) {
+      writeKeywordGroup(pdf, "New topics", focus.newTopicsNote || "", focus.newTopics, "None.", false);
+    }
+    pdf.note(focus.note);
+
+    pdf.h2("7. Images and alt text");
+    const images = result.images;
+    if (!images || images.status !== "ok") {
+      pdf.p(images?.reason || "Image audit unavailable.");
+    } else {
+      const summary = images.summary || {};
+      const comp = images.competitors;
+      pdf.p(`${summary.total || 0} article images · ${summary.ok || 0} with good alt text${summary.decorative ? ` · ${summary.decorative} decorative` : ""}${comp ? ` · competitors average ${comp.avg_images} images${comp.avg_descriptive_pct != null ? `, ${comp.avg_descriptive_pct}% with descriptive alt` : ""}` : ""}`);
+      (images.recommendations || []).forEach((rec) => pdf.item(null, rec));
+      const items = images.items || [];
+      if (items.length) {
+        pdf.table(
+          ["Image", "Section", "Alt now", "Issue", "Suggested alt"],
+          items.map((item) => [
+            item.filename || item.src || "image",
+            item.section || "—",
+            item.alt || "none",
+            item.issue || "",
+            item.suggested_alt ? `${item.suggested_alt} (Draft from ${item.suggestion_basis || "alt"})` : "Describe what the image shows",
+          ]),
+        );
+      } else if (summary.total) {
+        pdf.p("No alt-text issues found.");
+      }
+      pdf.note(images.note || "");
+    }
+
+    pdf.h2("8. Readability and on-page gaps");
+    if (readability.status === "unavailable") {
+      pdf.p(readability.reason || "Readability unavailable");
+    } else {
+      pdf.p(`${readability.interpretation || ""} · Flesch ${scoreNum(readability.flesch_reading_ease)}${readability.flesch_kincaid_grade != null ? ` · Grade ${readability.flesch_kincaid_grade}` : ""}${readability.avg_sentence_length != null ? ` · Avg sentence ${readability.avg_sentence_length} words` : ""}`);
+    }
+    if (citations.length) {
+      pdf.h3("Citation opportunities");
+      pdf.table(["Question", "Status"], citations.map((row) => [row.keyword_or_question, row.status]));
+    }
+    if (traffic.length) {
+      pdf.h3("On-page gaps vs competitors");
+      traffic.forEach((row) => pdf.item(null, `${row.reason} — ${row.fix}`));
+    }
+
+    pdf.h2("9. Your page");
+    pdf.kv("Title", page.title || "—");
+    pdf.kv("URL", page.url || result.blog_url || "—");
+    pdf.kv("Words", formatWords(page.word_count));
+    pdf.kv("H2s", String(page.h2_count ?? "—"));
+    pdf.kv("On-page scores", scoreLine(yours));
+    if (yours.keyword_targeting_score != null || yours.onpage_technical_score != null) {
+      pdf.p(`Keyword targeting ${yours.keyword_targeting_score ?? "N/A"} · On-page technical ${yours.onpage_technical_score ?? "N/A"}`);
+    }
+    if (competitors.length) {
+      pdf.p(`Competitor average: ${scoreLine(avg)}${avg.sample_note ? ` (${avg.sample_note})` : ""}`);
+    }
+    writeScoreFactors(pdf, yours);
+    const yourHeads = pageHeadings(page, false);
+    if (yourHeads.length) {
+      pdf.h3("Headings");
+      yourHeads.forEach((heading) => pdf.item(null, heading));
+    }
+    if (page.meta_description) {
+      pdf.h3("Meta description");
+      pdf.p(page.meta_description);
+    }
+
+    pdf.h2("10. Competitors you added");
+    if (!competitors.length) {
+      pdf.p("No competitor URLs were added, so this is an audit of your page only.");
+    } else {
+      competitors.forEach((row, i) => {
+        pdf.h3(`${i + 1}. ${row.domain || row.url || "Competitor"}`);
+        if (row.url) pdf.p(row.url);
+        pdf.p(`${formatWords(row.word_count)} · ${row.h2_count ?? "—"} H2s`);
+        pdf.p(`Scores: ${scoreLine(row.scores || {})}`);
+        writeScoreFactors(pdf, row.scores || {});
+        const heads = headingList(row.h2_headings).concat(headingList(row.h2)).concat(headingList(row.h1_headings)).concat(headingList(row.h1));
+        if (heads.length) {
+          pdf.note("Headings");
+          heads.forEach((heading) => pdf.item(null, heading));
+        }
+      });
+    }
+
+    pdf.h2("Notes");
+    pdf.note("Search volume, keyword difficulty, domain authority, backlinks, and Core Web Vitals are Data unavailable unless a measured source is shown above. On-page scores are extract checks, not traffic forecasts. Recommended copy is a draft, not a guaranteed ranking change.");
+    pdf.finish(pdfFilename(result));
+  }
+
+  function downloadPdfReport() {
+    if (!currentResult) {
+      showError("Run an analysis first, then download the PDF.");
       return;
     }
-    window.print();
+    const btn = document.querySelector('[data-export="pdf"]');
+    const label = btn?.textContent;
+    try {
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Preparing PDF…";
+      }
+      writeAnalysisPdf(currentResult);
+    } catch (err) {
+      console.error("[Competitor Analysis] pdf failed", err);
+      showError(err.message || "Could not create the PDF.");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label || "Download PDF";
+      }
+    }
   }
 
   document.querySelectorAll("[data-export]").forEach((btn) => {
-    btn.addEventListener("click", () => exportReport(btn.dataset.export));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.export === "pdf") downloadPdfReport();
+    });
   });
+
+  function toggleScoreFactors(event) {
+    const btn = event.target.closest("[data-score-toggle]");
+    if (!btn || btn.disabled) return;
+    const wrap = btn.closest(".ca-scores");
+    const panel = wrap?.querySelector(`[data-factors="${btn.dataset.scoreToggle}"]`);
+    if (!panel) return;
+    const open = panel.hidden;
+    wrap.querySelectorAll("[data-factors]").forEach((el) => { el.hidden = true; });
+    wrap.querySelectorAll("[data-score-toggle]").forEach((el) => el.setAttribute("aria-expanded", "false"));
+    if (open) {
+      panel.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+    }
+  }
+  [dashBody, yoursEl, tableEl].forEach((el) => el?.addEventListener("click", toggleScoreFactors));
+  document.getElementById("ca-snapshot")?.addEventListener("click", (event) => event.stopPropagation());
 
   dashBody?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-mismatch]");
@@ -1157,12 +1762,6 @@
       renderDashboard(currentResult);
     }
   });
-  ["ca-filter-priority"].forEach((id) => {
-    document.getElementById(id)?.addEventListener("change", () => {
-      if (currentResult) renderDashboard(currentResult);
-    });
-  });
-
   renderSnapshotOptions();
   setRewriteEnabled(false);
 })();

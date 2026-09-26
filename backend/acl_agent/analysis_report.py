@@ -4,10 +4,12 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from acl_agent.gsc_diagnosis import expected_ctr
 from acl_agent.keywords import (
     article_intent,
     classify_page_intent,
     content_tokens,
+    fold_phrase,
     relevance_score,
     validate_keyword,
 )
@@ -31,42 +33,6 @@ _BOILER_HEADING = re.compile(
     r"\b(buy|shop|online|price|prices|cart|collection|amazon|bewakoof|crazymonk)\b",
     re.I,
 )
-
-_STYLE_TOPIC_GAPS = [
-    ("How should an oversized hoodie fit?", "How should an oversized hoodie fit?",
-     ["What oversized means on the shoulders", "How long the hem should sit", "What to avoid"]),
-    ("What pants pair well with an oversized hoodie?", "What to wear with an oversized hoodie",
-     ["Jeans and trousers that balance the volume", "Joggers vs tailored pants", "Tuck and proportion tips"]),
-    ("Best shoes for an oversized hoodie outfit", "Shoes that work with oversized hoodie outfits",
-     ["Sneakers", "Boots", "When dress shoes fail"]),
-    ("Layering oversized hoodies with jackets or coats", "Layering ideas for different seasons",
-     ["Light overshirts", "Coats in cold weather", "What not to layer"]),
-    ("Oversized hoodie outfits for casual and streetwear looks", "Casual and streetwear outfit combinations",
-     ["Weekend errands", "Streetwear layers", "One elevated evening look"]),
-    ("How to style oversized hoodies in warm weather", "Warm-weather oversized hoodie outfits",
-     ["Fabric weight", "Shorts pairings", "When to skip the hoodie"]),
-    ("Common oversized hoodie styling mistakes", "Common styling mistakes to avoid",
-     ["Too much volume", "Wrong shoe weight", "Missing a belt or hem"]),
-    ("Outfit ideas for different body types", "How to choose a flattering oversized fit",
-     ["Petite", "Tall", "Broad shoulders"]),
-    ("How to choose the right hoodie color", "How to choose the right hoodie color",
-     ["Neutrals", "Contrast with pants", "Print vs solid"]),
-    ("How to accessorize an oversized hoodie outfit", "Accessories that finish an oversized hoodie outfit",
-     ["Hats", "Bags", "Jewelry without clutter"]),
-]
-
-_DEFAULT_OUTLINE = [
-    "What makes an oversized hoodie look stylish?",
-    "Choose the right oversized hoodie fit.",
-    "What to wear with an oversized hoodie.",
-    "Best pants and jeans for oversized hoodies.",
-    "Shoes that work with oversized hoodie outfits.",
-    "Layering ideas for different seasons.",
-    "Casual and streetwear outfit combinations.",
-    "Common styling mistakes to avoid.",
-    "Frequently asked questions.",
-]
-
 
 def _heading_pool(row: dict[str, Any]) -> list[str]:
     title = str(row.get("title") or "").strip().lower()
@@ -176,36 +142,11 @@ def content_gaps(
             "reason": "Competitor H2/H3 coverage that your article does not yet match.",
         })
 
-    kw_tokens = set(content_tokens(keyword))
-    if {"hoodie"} <= kw_tokens and ({"style", "outfit", "wear"} & kw_tokens):
-        for topic, heading, outline in _STYLE_TOPIC_GAPS:
-            if any(_similar(topic, mine_h) or _similar(heading, mine_h) for mine_h in mine):
-                continue
-            if any(_similar(topic, row["missing_topic"]) for row in rows):
-                continue
-            evidence = [d for item, meta in covered.items() if _similar(topic, item) for d in meta["domains"]]
-            rows.append({
-                "missing_topic": topic,
-                "evidence_type": "competitor_heading" if evidence else "semantic_gap",
-                "evidence_sources": evidence[:4],
-                "covered_by_competitors": evidence[:4],
-                "covered_by": ", ".join(evidence[:4]) or "topic model",
-                "importance": "high" if any(token in topic.lower() for token in ("fit", "pants", "mistake")) else "medium",
-                "intent": "informational",
-                "search_intent": "informational",
-                "recommended_heading": heading,
-                "suggested_outline": outline,
-                "reason": "Topic-model gap for an informational styling article, labeled as semantic_gap when competitors do not already use this H2.",
-            })
-
     rows.sort(key=lambda item: (0 if item["importance"] == "high" else 1, -len(item.get("covered_by_competitors") or [])))
-    if {"hoodie"} <= kw_tokens and ({"style", "outfit"} & kw_tokens):
-        recommended = list(_DEFAULT_OUTLINE)
-    else:
-        your_h2 = [h for h in ((yours or {}).get("h2_headings") or [])[:3] if not _BOILER_HEADING.search(h or "")]
-        recommended = (your_h2 or ["Introduction"]) + [r["recommended_heading"] for r in rows[:8]]
-        if "Frequently asked questions" not in recommended:
-            recommended.append("Frequently asked questions")
+    your_h2 = [h for h in ((yours or {}).get("h2_headings") or [])[:3] if not _BOILER_HEADING.search(h or "")]
+    recommended = (your_h2 or ["Introduction"]) + [r["recommended_heading"] for r in rows[:8]]
+    if "Frequently asked questions" not in recommended:
+        recommended.append("Frequently asked questions")
     recommended = [h for h in recommended if not _BOILER_HEADING.search(h)]
     return {
         "table": rows[:16],
@@ -605,9 +546,14 @@ def action_plan(
             "Fix the live URL or paste the article; scores are not meaningful on placeholders.",
             "Unblocks every other check", "Low")
     seo = your_scores.get("seo")
+    targeting = your_scores.get("keyword_targeting_score")
+    technical = your_scores.get("onpage_technical_score")
     if isinstance(seo, int) and seo < 60:
+        split_note = ""
+        if targeting is not None or technical is not None:
+            split_note = f" Keyword targeting {targeting}; on-page technical {technical}."
         add("High Priority", "SEO", "On-page SEO checklist is behind ranking pages",
-            "Apply the SEO factor tips: title, H1, headings, FAQ, alt text.",
+            "Apply the SEO factor tips: title, H1, headings, FAQ, alt text." + split_note,
             "On-page readiness", "Medium")
     for gap in (keyword_gaps.get("gaps") or {}).get("high-priority") or []:
         add("High Priority", "Keyword", f"Missing keyword topic: {gap.get('keyword')}",
@@ -637,3 +583,467 @@ def action_plan(
         "Use Search Console / CrUX / a backlink tool you already pay for.",
         "Unknown in this app", "Medium")
     return items
+
+
+def _mentions_phrase(haystack: str, phrase: str) -> bool:
+    if not haystack or not phrase:
+        return False
+    folded_h, folded_p = fold_phrase(haystack), fold_phrase(phrase)
+    if folded_p and folded_p in folded_h:
+        return True
+    tokens = set(content_tokens(phrase))
+    return bool(tokens) and tokens <= set(content_tokens(haystack))
+
+
+def build_verdict_summary(
+    diagnosis_summary: Optional[dict[str, Any]] = None,
+    focus: Optional[dict[str, Any]] = None,
+    keyword_mismatch: Optional[dict[str, Any]] = None,
+    gsc: Optional[dict[str, Any]] = None,
+    page: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Observed facts, areas to check, and verification steps — not a single cause."""
+    diagnosis_summary = diagnosis_summary or {}
+    focus = focus or {}
+    gsc = gsc or {}
+    page = page or {}
+    targeting = gsc.get("keyword_targeting") or {}
+    index = gsc.get("index_status") or {}
+    observed: list[str] = []
+    checks: list[str] = []
+    verify: list[str] = []
+
+    if index.get("source") == "url_inspection":
+        coverage = index.get("coverage_state") or index.get("label") or "URL Inspection"
+        crawl = f" Last crawl {index['last_crawl']}." if index.get("last_crawl") else ""
+        observed.append(f"Google index: {index.get('label') or coverage} ({coverage}).{crawl}")
+    elif index.get("source") == "robots_only":
+        robots_note = index.get("robots_status") or "unknown"
+        observed.append(
+            f"Google index: Inspection unavailable. Page robots is {robots_note} — that is not a Google index check."
+        )
+        if index.get("impressions_hint"):
+            observed.append(str(index["impressions_hint"]))
+    elif index:
+        observed.append("Google index: Inspection unavailable.")
+
+    drop_pct = diagnosis_summary.get("delta_pct")
+    if isinstance(drop_pct, (int, float)):
+        observed.append(f"Impressions changed {drop_pct:+.1f}% versus the previous period.")
+    elif diagnosis_summary.get("text"):
+        observed.append(str(diagnosis_summary["text"]).split(".")[0] + ".")
+
+    ours = list(focus.get("our_blog") or [])
+    best = ours[0] if ours and focus.get("our_blog_basis") == "search_console" else None
+    query = ""
+    if best and best.get("keyword"):
+        query = str(best["keyword"])
+        evidence = str(best.get("evidence") or "")
+        pos_match = re.search(r"avg position\s+([\d.]+)", evidence, re.I)
+        rank_bit = f" at average position {pos_match.group(1)}" if pos_match else ""
+        observed.append(f"Search Console already shows demand for “{query}”{rank_bit}.")
+        title = str(page.get("title") or "")
+        h1 = str(page.get("h1") or (page.get("h1_headings") or [""])[0] or "")
+        targets_best = _mentions_phrase(title, query) or _mentions_phrase(h1, query)
+        if targets_best:
+            observed.append("Title and H1 already mention that query.")
+        else:
+            observed.append("Title and H1 do not mention that query.")
+
+    if not observed:
+        observed.append("No Search Console verdict is available yet. Use the action plan from the on-page extract.")
+
+    if isinstance(drop_pct, (int, float)) and drop_pct <= -30:
+        checks.extend(["Ranking decline", "Indexing", "Seasonality", "Competitor changes", "SERP changes"])
+    if diagnosis_summary.get("seasonal_caveat"):
+        if "Seasonality" not in checks:
+            checks.append("Seasonality")
+    if keyword_mismatch or targeting.get("mismatch") or (gsc.get("title") or {}).get("issues") or (gsc.get("h1") or {}).get("issues"):
+        if "Title/H1 vs ranking query" not in checks:
+            checks.append("Title/H1 vs ranking query")
+    indexing = (gsc.get("indexing") or {})
+    if indexing.get("status") == "noindex" or index.get("robots_status") == "noindex":
+        checks.append("noindex on the live URL")
+    if index.get("indexed") is False:
+        if "Indexing" not in checks:
+            checks.append("Indexing")
+    if not checks:
+        checks.append("On-page extract vs the target keyword")
+
+    if index.get("source") == "url_inspection" and index.get("coverage_state"):
+        verify.append(f"URL Inspection already returned: {index['coverage_state']}")
+    else:
+        verify.append("Check URL indexing in Search Console")
+        verify.append("Check Search Console coverage for this URL")
+    year_ago = (gsc.get("comparisons") or {}).get("year_ago") or {}
+    if year_ago.get("status") != "ok":
+        verify.append("Compare a shorter window or wait for year-over-year data (16-month Search Console limit)")
+    else:
+        verify.append("Compare the year-ago Search Console window already in this report")
+
+    confidence = str(diagnosis_summary.get("confidence") or "").strip()
+    text_parts = list(observed)
+    if confidence:
+        extra = f"Confidence in the sample is {confidence}"
+        if diagnosis_summary.get("seasonal_caveat"):
+            extra += "; year-over-year data is unavailable, so treat seasonality as a hypothesis"
+        text_parts.append(extra + ".")
+    return {
+        "text": " ".join(text_parts),
+        "confidence": confidence or None,
+        "seasonal_caveat": bool(diagnosis_summary.get("seasonal_caveat")),
+        "observed": observed,
+        "areas_to_check": checks,
+        "verification": verify,
+    }
+
+
+def merged_content_opportunities(
+    new_topics: Optional[list[dict[str, Any]]] = None,
+    content_gaps: Optional[dict[str, Any]] = None,
+    gsc_queries: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Display merge of keyword-gap phrases and heading-gap rows. Does not change detectors."""
+    topics = list(new_topics or [])
+    headings = list((content_gaps or {}).get("table") or [])
+    items: list[dict[str, Any]] = []
+
+    def importance_rank(value: str) -> int:
+        return {"high": 0, "medium": 1, "low": 2}.get((value or "").lower(), 3)
+
+    for row in topics:
+        phrase = str(row.get("keyword") or "").strip()
+        if not phrase:
+            continue
+        items.append({
+            "topic": phrase,
+            "sources": ["keyword_gap"],
+            "covered_by": row.get("evidence") or "",
+            "importance": "medium",
+            "intent": "",
+            "recommended_heading": phrase,
+        })
+    for row in headings:
+        heading = str(row.get("missing_topic") or row.get("recommended_heading") or "").strip()
+        if not heading:
+            continue
+        match = next(
+            (
+                item for item in items
+                if _similar(heading, item["topic"])
+                or relevance_score(heading, item["topic"]) >= 0.55
+            ),
+            None,
+        )
+        if match:
+            if "heading_gap" not in match["sources"]:
+                match["sources"].append("heading_gap")
+            if row.get("covered_by") and row.get("covered_by") != UNAVAILABLE:
+                match["covered_by"] = row.get("covered_by")
+            if importance_rank(str(row.get("importance") or "")) < importance_rank(match["importance"]):
+                match["importance"] = row.get("importance") or match["importance"]
+            continue
+        items.append({
+            "topic": heading,
+            "sources": ["heading_gap"],
+            "covered_by": row.get("covered_by") or "",
+            "importance": row.get("importance") or "medium",
+            "intent": row.get("search_intent") or row.get("intent") or "",
+            "recommended_heading": row.get("recommended_heading") or heading,
+        })
+    items.sort(key=lambda item: (
+        importance_rank(item["importance"]),
+        0 if len(item["sources"]) > 1 else 1,
+        item["topic"].lower(),
+    ))
+    for item in items:
+        _annotate_opportunity(item, gsc_queries or [])
+    return {
+        "table": items,
+        "note": "Merged from keyword-gap phrases and competitor headings. Raw new_topics and content_gaps stay in the response.",
+    }
+
+
+def _competitor_breadth(covered_by: str) -> int:
+    blob = str(covered_by or "")
+    match = re.search(r"used by\s+(\d+)", blob, re.I)
+    if match:
+        return int(match.group(1))
+    parts = [part.strip() for part in re.split(r"[,;]", blob) if part.strip() and part.strip() != UNAVAILABLE]
+    return len(parts)
+
+
+def _related_gsc_query(phrase: str, queries: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    for row in queries or []:
+        other = str(row.get("query") or "")
+        if not other:
+            continue
+        if _similar(phrase, other) or relevance_score(phrase, other) >= 0.45:
+            return row
+    return None
+
+
+def _annotate_opportunity(item: dict[str, Any], queries: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+    """Labels only: why, confidence, coverage class. Does not change detectors."""
+    topic = str(item.get("topic") or "")
+    related = _related_gsc_query(topic, queries or [])
+    breadth = _competitor_breadth(str(item.get("covered_by") or ""))
+    importance = str(item.get("importance") or "medium").lower()
+    rel = item.get("relevance_score")
+    if rel is None and topic:
+        rel = 0.5 if "keyword_gap" in (item.get("sources") or []) else 0.4
+    why = []
+    if breadth:
+        why.append(f"{breadth} competitor page(s) cover this topic")
+    if topic:
+        why.append("Current page does not already use this heading or phrase")
+    if related:
+        pos = related.get("position")
+        pos_bit = f" (avg position {float(pos):.1f})" if isinstance(pos, (int, float)) else ""
+        why.append(f"Related Search Console query “{related.get('query')}” already has impressions{pos_bit}")
+    if not why:
+        why.append("Shown because a competitor heading or keyword-gap phrase matched the existing filters")
+
+    if related and (rel or 0) >= 0.35:
+        coverage = "must"
+        confidence = "high"
+    elif breadth >= 2 and (rel or 0) >= 0.35:
+        coverage = "recommended"
+        confidence = "medium"
+    elif (rel or 0) < 0.35 or importance == "low":
+        coverage = "skip"
+        confidence = "low"
+    else:
+        coverage = "optional"
+        confidence = "low"
+
+    item["why"] = why
+    item["recommendation_confidence"] = confidence
+    item["coverage_class"] = coverage
+    item["gsc_related_query"] = (related or {}).get("query")
+    return item
+
+
+def _impact_band(priority: str, estimated_impact: str = "") -> str:
+    blob = f"{priority} {estimated_impact}".lower()
+    if re.search(r"\b\d+\s*clicks?\b|\bforecast\b|\b~", blob):
+        estimated_impact = ""
+    if "critical" in blob or blob.startswith("high"):
+        return "High"
+    if blob.startswith("medium"):
+        return "Medium"
+    return "Low"
+
+
+def annotate_actions(
+    plan: list[dict[str, Any]],
+    gsc: Optional[dict[str, Any]] = None,
+    fallback_scores: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Attach why / confidence / coverage class to existing action rows."""
+    gsc = gsc or {}
+    targeting = gsc.get("keyword_targeting") or {}
+    fallback = (fallback_scores or {}).get("confidence") == "low" and (fallback_scores or {}).get("status") == "ok"
+    queries = list(gsc.get("queries") or [])
+    out = []
+    for raw in plan or []:
+        item = dict(raw)
+        category = str(item.get("category") or "")
+        why = []
+        coverage = "recommended"
+        confidence = "medium"
+        if category in {"Title", "H1", "Meta"} and (targeting.get("mismatch") or targeting.get("primary_ranking_query")):
+            why.append("Search Console’s strongest query differs from the title/H1 extract")
+            coverage = "must"
+            confidence = "high"
+        elif category == "Indexing":
+            why.append("Extracted robots/indexing status says this URL is noindex")
+            coverage = "must"
+            confidence = "high"
+        elif category in {"Keyword", "Content"}:
+            related = _related_gsc_query(str(item.get("related_gap") or item.get("issue") or ""), queries)
+            if related:
+                why.append(f"Related Search Console query “{related.get('query')}” already has impressions")
+                coverage = "must"
+                confidence = "high"
+            else:
+                why.append("A competitor heading or keyword-gap phrase is missing from your page")
+                coverage = "recommended"
+                confidence = "medium"
+        elif category == "Images":
+            why.append("Extracted images are missing descriptive alt text")
+            coverage = "recommended"
+            confidence = "high"
+        elif category == "Off-page":
+            why.append("This app does not measure authority or Core Web Vitals")
+            coverage = "skip"
+            confidence = "low"
+        else:
+            why.append(str(item.get("issue") or "On-page checklist finding"))
+        if fallback and category == "SEO":
+            confidence = "low"
+            why.append("Checklist used a fallback scorer")
+        item["why"] = why
+        item["recommendation_confidence"] = confidence
+        item["coverage_class"] = coverage
+        original_impact = str(item.get("estimated_impact") or "")
+        if re.search(r"\b\d+\s*clicks?\b|\bforecast\b", original_impact, re.I):
+            item["impact_note"] = "Not a traffic forecast. " + original_impact
+            item["estimated_impact"] = _impact_band(str(item.get("priority") or ""), "")
+        else:
+            item["impact_note"] = original_impact
+            item["estimated_impact"] = _impact_band(str(item.get("priority") or ""), original_impact)
+        out.append(item)
+    return out
+
+
+def quick_wins(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    wins = []
+    for item in plan or []:
+        if str(item.get("estimated_effort") or "").lower() != "low":
+            continue
+        if str(item.get("coverage_class") or "") == "skip":
+            continue
+        if str(item.get("category") or "") == "Off-page":
+            continue
+        wins.append(item)
+    return wins[:6]
+
+
+def gsc_query_opportunities(gsc: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Bucket existing Search Console queries by current position. No new API calls."""
+    rows = [
+        row for row in ((gsc or {}).get("queries") or [])
+        if row.get("query") and not row.get("branded")
+    ]
+    buckets = {"quick_wins": [], "page_two": [], "content": []}
+    for row in rows:
+        try:
+            position = float(row.get("position") or 0)
+        except (TypeError, ValueError):
+            continue
+        item = {
+            "query": row.get("query"),
+            "position": position,
+            "impressions": row.get("impressions"),
+            "clicks": row.get("clicks"),
+        }
+        if 4 <= position <= 10:
+            buckets["quick_wins"].append(item)
+        elif 10 < position <= 20:
+            buckets["page_two"].append(item)
+        elif 20 < position <= 50:
+            buckets["content"].append(item)
+    for key in buckets:
+        buckets[key] = sorted(buckets[key], key=lambda item: item["position"])[:8]
+    return {
+        **buckets,
+        "note": "Current Search Console positions for this URL, not a traffic forecast.",
+    }
+
+
+def ctr_checklist(gsc: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Possible CTR checks from extract + GSC. Does not claim SERP features."""
+    gsc = gsc or {}
+    impressions = gsc.get("impressions")
+    ctr = gsc.get("ctr")
+    position = gsc.get("position")
+    targeting = gsc.get("keyword_targeting") or {}
+    intent = "informational"
+    split = gsc.get("intent_split") or {}
+    if split:
+        intent = max(split.items(), key=lambda pair: pair[1])[0]
+    expected = expected_ctr(position, intent) if isinstance(position, (int, float)) else None
+    gap = (
+        isinstance(impressions, (int, float))
+        and impressions >= 100
+        and isinstance(ctr, (int, float))
+        and expected is not None
+        and ctr < expected * 0.55
+    )
+    checks = []
+    if targeting.get("mismatch") or not targeting.get("in_title"):
+        checks.append("Title does not match the ranking query")
+    meta = gsc.get("meta") or {}
+    if meta.get("issues"):
+        checks.append("Meta description is thin or missing from the extract")
+    if isinstance(position, (int, float)) and position > 10:
+        checks.append(f"Average position is {position:.1f} (outside page one)")
+    if not checks:
+        checks.append("Compare the live snippet in Search Console; this app does not see SERP features or ads")
+    observed = ""
+    if isinstance(ctr, (int, float)) and isinstance(impressions, (int, float)):
+        pos_bit = f" at average position {position:.1f}" if isinstance(position, (int, float)) else ""
+        observed = f"CTR {ctr:.1%} from {int(impressions)} impressions{pos_bit}."
+        if expected is not None:
+            observed += f" Intent baseline for {intent} at this position is about {expected:.0%} (checklist, not a forecast)."
+    return {
+        "status": "gap" if gap else ("ok" if observed else "unavailable"),
+        "observed": observed,
+        "possible_checks": checks if gap else [],
+        "note": "Possible on-page checks only. Not a click forecast and not a SERP-feature diagnosis.",
+    }
+
+
+# Word-count sentence: yours >= 200 words, competitor >= 1.5x and at least +400 words.
+# Technical sentence: on-page technical sub-score lead of 15+ points.
+# Signal sentence: a positive competitor signal your page does not already have.
+_VS_YOU_WORD_RATIO = 1.5
+_VS_YOU_WORD_MIN_YOURS = 200
+_VS_YOU_WORD_MIN_DELTA = 400
+_VS_YOU_TECH_GAP = 15
+
+
+def competitor_difference(
+    yours: Optional[dict[str, Any]],
+    your_scores: Optional[dict[str, Any]],
+    competitor: Optional[dict[str, Any]],
+    yours_signals: Optional[list[dict[str, Any]]] = None,
+) -> Optional[str]:
+    """One sentence for the largest existing gap vs your page. None if nothing stands out."""
+    yours = yours or {}
+    your_scores = your_scores or {}
+    competitor = competitor or {}
+    yours_labels = {
+        str(item.get("label") or "").strip().lower()
+        for item in (yours_signals or [])
+        if item.get("kind") in {"positive", "good"} and item.get("label")
+    }
+    candidates: list[tuple[float, str]] = []
+
+    yours_words = int(yours.get("word_count") or 0)
+    theirs_words = int(competitor.get("word_count") or 0)
+    if (
+        yours_words >= _VS_YOU_WORD_MIN_YOURS
+        and theirs_words >= int(yours_words * _VS_YOU_WORD_RATIO)
+        and theirs_words - yours_words >= _VS_YOU_WORD_MIN_DELTA
+    ):
+        ratio = theirs_words / yours_words
+        candidates.append((ratio, f"{theirs_words:,} words ({ratio:.1f}x yours)"))
+
+    yours_tech = your_scores.get("onpage_technical_score")
+    theirs_tech = (competitor.get("scores") or {}).get("onpage_technical_score")
+    if isinstance(yours_tech, int) and isinstance(theirs_tech, int) and theirs_tech - yours_tech >= _VS_YOU_TECH_GAP:
+        candidates.append(((theirs_tech - yours_tech) / _VS_YOU_TECH_GAP, f"on-page technical SEO {theirs_tech} vs your {yours_tech}"))
+
+    if int(competitor.get("table_count") or 0) >= 1 and int(yours.get("table_count") or 0) == 0:
+        candidates.append((1.4, "an on-page table you do not have"))
+
+    for item in competitor.get("signals") or []:
+        label = str(item.get("label") or "").strip()
+        if item.get("kind") not in {"positive", "good"} or not label:
+            continue
+        if label.lower() in yours_labels:
+            continue
+        candidates.append((1.2, label[0].lower() + label[1:] if label[0].isupper() else label))
+        break
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    lead = candidates[0][1]
+    extra = next((pair[1] for pair in candidates[1:] if pair[0] >= 1.2), None)
+    sentence = lead[0].upper() + lead[1:]
+    if extra:
+        sentence += f" and {extra}"
+    return sentence + "."

@@ -453,23 +453,31 @@ def _score_seo(
         "" if len(alts) >= 2 else "Add descriptive image alt text that includes the topic.",
     )
 
-    return _pack(
+    targeting_factors = [h1_factor, open_factor, dens_factor]
+    technical_factors = [
+        title_factor,
+        desc_factor,
+        heading_factor,
+        wc_factor,
+        link_factor,
+        sec_factor,
+        faq_factor,
+        alt_factor,
+    ]
+    report = _pack(
         "SEO",
         "On-page search checklist: keyword placement, metadata, structure, and links — not rank or backlinks.",
-        [
-            h1_factor,
-            open_factor,
-            dens_factor,
-            title_factor,
-            desc_factor,
-            heading_factor,
-            wc_factor,
-            link_factor,
-            sec_factor,
-            faq_factor,
-            alt_factor,
-        ],
+        targeting_factors + technical_factors,
     )
+
+    def _group_score(group: list[dict[str, Any]]) -> int:
+        earned = sum(int(item["score"] or 0) for item in group)
+        maximum = sum(int(item["max"]) for item in group)
+        return 0 if maximum <= 0 else int(round(100 * earned / maximum))
+
+    report["keyword_targeting_score"] = _group_score(targeting_factors)
+    report["onpage_technical_score"] = _group_score(technical_factors)
+    return report
 
 
 def _score_geo(

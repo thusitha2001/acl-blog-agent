@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/styles.css?v=ca11">
-<link rel="stylesheet" href="/assets/workspace.css?v=ca16">
+<link rel="stylesheet" href="/assets/workspace.css?v=ca22">
 </head>
 <body class="ws" data-page="competitors">
 <div class="workspace">
@@ -30,7 +30,7 @@
         <div>
           <p class="dash-kicker">Search intelligence</p>
           <h1>Competitor analysis</h1>
-          <p>Understand what already ranks, then find the angle your audience is still missing.</p>
+          <p>See how the page is doing, then what to change.</p>
         </div>
         <button type="button" class="btn-new-article" id="ca-rewrite" disabled>
           Rewrite this from the analysis
@@ -42,12 +42,12 @@
         <div class="field-group">
           <label class="field-label" for="ca-blog-url">Blog URL</label>
           <input type="url" id="ca-blog-url" placeholder="https://yoursite.com/blog/your-post" maxlength="500" autocomplete="off">
-          <p class="field-hint">The article you want to compare</p>
+          <p class="field-hint">Your live article</p>
         </div>
         <div class="field-group">
           <label class="field-label" for="ca-keyword">Target Keyword</label>
           <input type="text" id="ca-keyword" placeholder="e.g. best AI writing tools for ecommerce" maxlength="200" autocomplete="off" required>
-          <p class="field-hint">Required: the keyword this article should rank for</p>
+          <p class="field-hint">The keyword this page should rank for</p>
         </div>
         <div class="field-group">
           <label class="field-label" for="ca-country">Target country</label>
@@ -80,7 +80,7 @@
             <option value="6" selected>Last 6 months</option>
             <option value="12">Last 12 months</option>
           </select>
-          <p class="field-hint">Search Console lookback before results are built. Shorter windows catch recent drops; longer windows show seasonality.</p>
+          <p class="field-hint">Search Console window</p>
         </div>
         </div>
         <div class="field-group ca-url-field">
@@ -95,7 +95,7 @@
               Add another URL
             </button>
           </div>
-          <p class="field-hint">Only the URLs you add are analyzed. Leave empty to audit your blog on its own.</p>
+          <p class="field-hint">Optional. Leave empty to review your page only.</p>
         </div>
         <div class="ca-search-foot">
           <p class="ca-live" id="ca-live">
@@ -103,6 +103,12 @@
             Snapshot
             <span class="ca-live-meta" id="ca-live-meta">· Last analyzed --</span>
           </p>
+          <label class="ca-snapshot-label">
+            <span class="visually-hidden">Recent snapshot</span>
+            <select id="ca-snapshot" aria-label="Recent snapshot">
+              <option value="current">Recent snapshot</option>
+            </select>
+          </label>
           <button type="button" class="btn-new-article" id="ca-analyze">
             Analyze →
           </button>
@@ -122,52 +128,40 @@
         </div>
       </div>
 
-      <section class="ca-card ca-yours" id="ca-yours" hidden></section>
-
-      <div class="ca-grid">
-        <section class="ca-card ca-competitors" aria-label="Competitors">
-          <header class="ca-card-head">
-            <div>
-              <h2>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-                Competitors
-              </h2>
-              <p id="ca-comp-sub">Competitor URLs you added</p>
-            </div>
-            <label class="ca-snapshot-label">
-              <span class="visually-hidden">Snapshot</span>
-              <select id="ca-snapshot" aria-label="Recent snapshot">
-                <option value="current">Recent snapshot</option>
-              </select>
-            </label>
-          </header>
-          <div class="ca-table-wrap" id="ca-table">
-            <div class="ca-empty" id="ca-comp-empty">Add competitor URLs and run an analysis to compare them here</div>
-          </div>
-        </section>
-      </div>
-
       <section class="ca-card ca-dash" id="ca-dashboard" hidden>
         <header class="ca-card-head">
           <div>
-            <h2>Analysis dashboard</h2>
-            <p>On-page checklist vs ranking pages. Third-party traffic, DA, and volume are labeled Data unavailable.</p>
+            <h2>Report</h2>
+            <p>Status first, then the fixes. Search volume, DA, and backlinks stay Data unavailable.</p>
           </div>
           <div class="ca-export">
-            <button type="button" class="ca-export-btn" data-export="json">JSON</button>
-            <button type="button" class="ca-export-btn" data-export="csv">CSV</button>
-            <button type="button" class="ca-export-btn" data-export="md">Markdown</button>
-            <button type="button" class="ca-export-btn" data-export="pdf">Print / PDF</button>
+            <button type="button" class="ca-export-btn" data-export="pdf">Download PDF</button>
           </div>
         </header>
-        <div class="ca-dash-filters">
-          <label>Priority <select id="ca-filter-priority"><option value="">All</option><option>Critical</option><option>High Priority</option><option>Medium Priority</option><option>Low Priority</option></select></label>        </div>
         <div id="ca-dash-body"></div>
       </section>
+
+      <section class="ca-card ca-yours" id="ca-yours" hidden></section>
+
+      <div class="ca-grid">
+        <details class="ca-card ca-competitors ca-fold" aria-label="Competitors">
+          <summary class="ca-card-head">
+            <div>
+              <h2>Competitor pages</h2>
+              <p id="ca-comp-sub">Pages you added to compare</p>
+            </div>
+          </summary>
+          <div class="ca-table-wrap" id="ca-table">
+            <div class="ca-empty" id="ca-comp-empty">Add competitor URLs and run an analysis to compare them here</div>
+          </div>
+        </details>
+      </div>
     </main>
   </div>
 </div>
+<div id="ca-print-report" class="ca-print-report" hidden></div>
+<script src="/assets/jspdf.umd.min.js"></script>
 <script src="/assets/workspace.js?v=ca11"></script>
-<script src="/assets/competitors.js?v=ca21"></script>
+<script src="/assets/competitors.js?v=ca31"></script>
 </body>
 </html>

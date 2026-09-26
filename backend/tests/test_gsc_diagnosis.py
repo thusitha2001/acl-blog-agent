@@ -8,8 +8,10 @@ from acl_agent.analysis_report import action_plan
 from datetime import date
 
 from acl_agent.gsc_diagnosis import (
+    _on_page_audit,
     adapt_gsc_test_diagnosis,
     build_diagnosis_summary,
+    build_index_status,
     diagnose_page_visibility,
     diagnosis_window,
     merge_gsc_actions,
@@ -173,6 +175,22 @@ class DiagnosisSummaryTests(unittest.TestCase):
         self.assertIn("Seasonal/travel", travel["text"])
         self.assertFalse(yogurt["seasonal_caveat"])
         self.assertNotIn("Seasonal/travel", yogurt["text"])
+        self.assertEqual(travel["confidence"], "medium")
+        self.assertEqual(yogurt["confidence"], "high")
+
+    def test_seasonal_drop_without_year_ago_is_medium_confidence(self):
+        travel_page = {**YOGURT_PAGE, "url": "https://example.com/tourism/lempuyang-temple-bali"}
+        gsc = _yogurt_gsc(url=travel_page["url"], comparisons={"year_ago": {"status": "unavailable"}})
+        summary = build_diagnosis_summary(
+            gsc,
+            target_keyword="lempuyang temple bali",
+            page=travel_page,
+        )
+        self.assertEqual(summary["kind"], "visibility_drop")
+        self.assertIsNone((gsc.get("comparisons") or {}).get("year_ago", {}).get("impressions_delta_pct"))
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertNotEqual(summary["confidence"], "high")
+        self.assertIn("Seasonal/travel", summary["text"])
 
 
 class ActionMergeTests(unittest.TestCase):
@@ -337,6 +355,75 @@ class DiagnoseFunctionTests(unittest.TestCase):
         self.assertEqual(report["comparisons"]["year_ago"]["impressions"], 500)
         self.assertEqual(report["query_losses"]["items"][0]["query"], "how to make skyr yogurt")
         self.assertEqual(report["query_losses"]["items"][0]["kind"], "position_fell")
+        self.assertEqual(report["index_status"]["source"], "robots_only")
+        self.assertIsNone(report["index_status"]["indexed"])
+        self.assertEqual(report["index_status"]["label"], "Inspection unavailable")
+        self.assertIn("impressions", report["index_status"]["impressions_hint"].lower())
+
+    def test_url_inspection_submitted_and_indexed(self):
+        raw = {
+            "verdict": "Visibility problem",
+            "why": [],
+            "totals": {"clicks": 0, "impressions": 447, "ctr": 0.0, "position": 2.56},
+            "targeting": {"primary_query": "how to make skyr yogurt"},
+            "query_analysis": {"top": [], "intent_impressions": {}, "branded_impressions": 0},
+            "trend": {"status": "stable", "deltas": {}, "previous": {}},
+            "recommendations": [],
+            "content": {"issues": [], "off_topic_headings": []},
+            "links": {"internal_count": 4, "issues": []},
+            "indexing_issues": [],
+            "page": {"title": YOGURT_TITLE, "h1": [YOGURT_TITLE], "word_count": 900, "robots": "index,follow"},
+            "gsc": {
+                "days": 180,
+                "inspection": {
+                    "available": True,
+                    "coverage_state": "Submitted and indexed",
+                    "indexing_state": "INDEXING_ALLOWED",
+                    "last_crawl": "2026-09-20T08:00:00Z",
+                    "verdict": "PASS",
+                },
+            },
+        }
+        report = adapt_gsc_test_diagnosis(
+            raw,
+            blog_url=YOGURT_PAGE["url"],
+            days=180,
+            page=YOGURT_PAGE,
+            target_keyword="eco-friendly yogurt making",
+        )
+        self.assertTrue(report["index_status"]["indexed"])
+        self.assertEqual(report["index_status"]["label"], "Indexed")
+        self.assertEqual(report["index_status"]["source"], "url_inspection")
+        self.assertEqual(report["index_status"]["coverage_state"], "Submitted and indexed")
+        self.assertEqual(report["indexing"]["coverage_state"], "Submitted and indexed")
+        self.assertEqual(report["indexing"]["source"], "url_inspection")
+
+    def test_url_inspection_not_indexed(self):
+        status = build_index_status({
+            "impressions": 0,
+            "indexing": {
+                "robots": "index,follow",
+                "status": "indexable",
+                "inspection": {
+                    "available": True,
+                    "coverage_state": "Crawled - currently not indexed",
+                    "last_crawl": "2026-09-18T12:00:00Z",
+                },
+            },
+        })
+        self.assertFalse(status["indexed"])
+        self.assertEqual(status["label"], "Not indexed")
+        self.assertEqual(status["source"], "url_inspection")
+
+    def test_robots_only_does_not_claim_indexed(self):
+        status = build_index_status({
+            "impressions": 120,
+            "indexing": {"robots": "index,follow", "status": "indexable"},
+        })
+        self.assertIsNone(status["indexed"])
+        self.assertEqual(status["source"], "robots_only")
+        self.assertEqual(status["label"], "Inspection unavailable")
+        self.assertIn("not a coverage-state check", status["impressions_hint"])
 
     def test_ok_when_metrics_supplied(self):
         metrics = {
@@ -395,6 +482,24 @@ class DiagnosisWindowTests(unittest.TestCase):
         self.assertIn("16 months", bounds["reason"])
         short = year_ago_bounds("2026-06-26", "2026-09-21", as_of=date(2026, 9, 25))
         self.assertEqual(short["status"], "ok")
+
+    def test_off_topic_heading_needs_zero_overlap_and_low_relevance(self):
+        audit = _on_page_audit(
+            "https://example.com/dishes",
+            {
+                "title": "15 dishes for a crowd",
+                "h1": "15 dishes for a crowd",
+                "h2_headings": [
+                    "How to plate the dishes",
+                    "Filipino Lechon for a party",
+                    "Tips",
+                ],
+            },
+            "15 dishes for a crowd",
+        )
+        self.assertNotIn("How to plate the dishes", audit["off_topic_headings"])
+        self.assertNotIn("Tips", audit["off_topic_headings"])
+        self.assertIn("Filipino Lechon for a party", audit["off_topic_headings"])
 
     def test_query_loss_table_ranks_and_labels(self):
         report = query_loss_table(

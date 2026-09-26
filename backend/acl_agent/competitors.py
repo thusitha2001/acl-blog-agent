@@ -27,19 +27,31 @@ from acl_agent.analysis_input import (
     page_full_text,
     validate_blog_url,
 )
+from acl_agent.analysis_llm import (
+    build_analysis_llm_facts,
+    enrich_analysis_with_llm,
+)
 from acl_agent.analysis_report import (
     action_plan,
+    annotate_actions,
+    build_verdict_summary,
     citation_opportunities,
+    competitor_difference,
     content_gaps,
+    ctr_checklist,
+    gsc_query_opportunities,
     humanization_report,
     image_alt_report,
+    merged_content_opportunities,
     originality_report,
+    quick_wins,
     traffic_reasons,
 )
 from acl_agent.config import logger
 from acl_agent.gsc_diagnosis import (
     diagnosis_window,
     build_diagnosis_summary,
+    build_index_status,
     diagnose_page_visibility,
     merge_gsc_actions,
     unavailable_diagnosis,
@@ -99,6 +111,19 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/128.0.0.0 Safari/537.36"
 )
+
+
+def _public_action(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep the editor-facing fix only — no class, impact, priority, or why."""
+    return {
+        "category": item.get("category") or "",
+        "recommended_action": item.get("recommended_action") or item.get("issue") or "",
+        "depends_on_keyword": bool(item.get("depends_on_keyword")),
+    }
+
+
+def _public_topic(row: dict[str, Any]) -> dict[str, Any]:
+    return {"topic": row.get("topic") or ""}
 
 
 def _emit(on_progress: ProgressFn, stage: str, message: str) -> None:
@@ -927,7 +952,29 @@ def _unavailable_score(reason: str) -> dict[str, Any]:
     }
 
 
+def _seo_split(scores: dict[str, Any]) -> dict[str, Any]:
+    block = (scores.get("reports") or scores.get("scores") or {}).get("seo") or {}
+    return {
+        "keyword_targeting_score": block.get("keyword_targeting_score"),
+        "onpage_technical_score": block.get("onpage_technical_score"),
+    }
+
+
+def _public_reports(scores: dict[str, Any]) -> dict[str, Any]:
+    raw = scores.get("reports") or scores.get("scores") or {}
+    out: dict[str, Any] = {}
+    for key in ("seo", "geo", "aeo", "aio", "sxo"):
+        block = raw.get(key) or {}
+        if block.get("factors"):
+            out[key] = {
+                "score": block.get("score"),
+                "factors": block.get("factors"),
+            }
+    return out
+
+
 def _public_score_block(scores: dict[str, Any]) -> dict[str, Any]:
+    reports = _public_reports(scores)
     return {
         "seo": scores.get("seo"),
         "geo": scores.get("geo"),
@@ -938,6 +985,8 @@ def _public_score_block(scores: dict[str, Any]) -> dict[str, Any]:
         "confidence": scores.get("confidence"),
         "status": scores.get("status"),
         "reason": scores.get("reason"),
+        **_seo_split(scores),
+        **({"reports": reports} if reports else {}),
     }
 
 
@@ -1001,6 +1050,7 @@ def _score_page(keyword: str, page: dict[str, Any]) -> dict[str, Any]:
             "status": "ok",
             "reports": packed,
             "scores": packed,
+            **_seo_split({"reports": packed}),
         }
     except Exception as error:
         logger.warning("score_article failed for %s: %s", page.get("url"), error)
@@ -1021,6 +1071,7 @@ def _score_page(keyword: str, page: dict[str, Any]) -> dict[str, Any]:
             for key in ("seo", "geo", "aeo", "aio", "sxo")
         }
         scores["scores"] = scores["reports"]
+        scores.update(_seo_split(scores))
         return scores
 
 
@@ -1740,9 +1791,13 @@ def analyze_competitors(
         else:
             diffs[key] = None
     traffic = traffic_reasons(your_page, competitors, your_scores, avg_scores)
-    plan = merge_gsc_actions(
-        action_plan(your_page, your_scores, keyword_report, gap_report, readability, image_report),
+    plan = annotate_actions(
+        merge_gsc_actions(
+            action_plan(your_page, your_scores, keyword_report, gap_report, readability, image_report),
+            gsc_diagnosis,
+        ),
         gsc_diagnosis,
+        your_scores,
     )
     targeting = gsc_diagnosis.get("keyword_targeting") or {}
     keyword_mismatch = None
@@ -1815,6 +1870,25 @@ def analyze_competitors(
         content_gaps=gap_report,
         competitor_avg_words=competitor_avg_words,
     )
+    focus = keyword_report.get("focus") or {}
+    verdict = build_verdict_summary(
+        diagnosis_summary,
+        focus,
+        keyword_mismatch,
+        gsc_diagnosis,
+        your_page,
+    )
+    what_to_add = merged_content_opportunities(
+        focus.get("new_topics") or [],
+        gap_report,
+        gsc_diagnosis.get("queries") or [],
+    )
+    query_opportunities = gsc_query_opportunities(gsc_diagnosis)
+    ctr_report = ctr_checklist(gsc_diagnosis)
+    wins = quick_wins(plan)
+    yours_signals = _opportunity_signals(your_page) if your_page else []
+    for row in slim_competitors:
+        row["vs_you"] = competitor_difference(your_page, your_scores, row, yours_signals)
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()][:40]
     your_page_out = None
     if your_page:
@@ -1850,7 +1924,7 @@ def analyze_competitors(
             "faq": your_page.get("faq") or {},
             "image_count": your_page.get("image_count") or 0,
         }
-    return {
+    result = {
         "analysis_id": analysis_id,
         "client_analysis_id": client_analysis_id,
         "analysis_mode": mode,
@@ -1888,9 +1962,21 @@ def analyze_competitors(
         "humanization": human,
         "originality": original,
         "images": image_report,
-        "action_plan": plan,
-        "action_plan_report": plan_payload,
+        "action_plan": [_public_action(item) for item in plan],
+        "action_plan_report": {
+            **plan_payload,
+            "items": [_public_action(item) for item in (plan_payload.get("items") or [])],
+        },
+        "verdict": verdict,
+        "what_to_add": {
+            **what_to_add,
+            "table": [_public_topic(row) for row in ((what_to_add or {}).get("table") or [])],
+        },
+        "quick_wins": [_public_action(item) for item in wins],
+        "query_opportunities": query_opportunities,
+        "ctr_checklist": ctr_report,
         "gsc_diagnosis": gsc_diagnosis,
+        "index_status": gsc_diagnosis.get("index_status") or build_index_status(gsc_diagnosis, your_page),
         "diagnosis_window": window,
         "diagnosis_summary": diagnosis_summary,
         "serp_warning": serp_warning,
@@ -1916,3 +2002,17 @@ def analyze_competitors(
             if metric != "verified traffic" or gsc_diagnosis.get("status") != "ok"
         ],
     }
+    _emit(on_progress, "report", "Writing recommendations")
+    result["llm_advice"] = enrich_analysis_with_llm(
+        build_analysis_llm_facts(
+            target_keyword=keyword or serp_query,
+            page=your_page_out or your_page,
+            gsc=gsc_diagnosis,
+            index_status=result["index_status"],
+            verdict=verdict,
+            action_plan=plan,
+            what_to_add=what_to_add,
+            keyword_mismatch=keyword_mismatch,
+        )
+    )
+    return result

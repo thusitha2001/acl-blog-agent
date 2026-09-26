@@ -953,12 +953,16 @@ def keyword_focus(
     competitor_total: int = 0,
     country: str = "us",
     per_group: int = 3,
+    per_close: Optional[int] = None,
+    per_new: Optional[int] = None,
     metrics: MetricProvider = DEFAULT_METRICS,
 ) -> dict[str, Any]:
-    """Pick at most `per_group` keywords for each of: our blog, competitors, opportunities.
+    """Pick at most `per_group` keywords for our blog, competitors, close-to-ranking, and new topics.
 
     Performance for our blog comes from Search Console when connected; otherwise
     from on-page usage. Volume is only shown when a metric provider returns it.
+    Close-to-ranking and new topics are capped separately so GSC striking-distance
+    queries cannot crowd out content-gap phrases.
     """
     target_key = phrase_key(keyword) if keyword else ""
     used: set[str] = set()
@@ -968,6 +972,8 @@ def keyword_focus(
         if gsc.get("status") == "ok" and row.get("query") and not row.get("branded")
     ]
     has_gsc = bool(queries)
+    close_limit = per_group if per_close is None else per_close
+    new_limit = per_group if per_new is None else per_new
 
     def volume_of(phrase: str) -> Any:
         try:
@@ -976,7 +982,8 @@ def keyword_focus(
             value = None
         return UNAVAILABLE if value is None else value
 
-    def take(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def take(candidates: list[dict[str, Any]], limit: Optional[int] = None) -> list[dict[str, Any]]:
+        cap = per_group if limit is None else limit
         picked = []
         for item in candidates:
             key = phrase_key(item["keyword"])
@@ -984,9 +991,28 @@ def keyword_focus(
                 continue
             used.add(key)
             picked.append({**item, "search_volume": volume_of(item["keyword"])})
-            if len(picked) >= per_group:
+            if len(picked) >= cap:
                 break
         return picked
+
+    def is_primary_variant(phrase: str) -> bool:
+        if not phrase:
+            return True
+        if target_key and phrase_key(phrase) == target_key:
+            return True
+        return bool(keyword) and relevance_score(phrase, keyword) >= 0.85
+
+    def sort_by_volume(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        known = {item["keyword"]: volume_of(item["keyword"]) for item in items}
+        items.sort(key=lambda item: (
+            not isinstance(known[item["keyword"]], int),
+            -(known[item["keyword"]] if isinstance(known[item["keyword"]], int) else 0),
+            item.get("_rank", (99,)),
+        ))
+        return items
+
+    def without_rank(item: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in item.items() if key != "_rank"}
 
     def gsc_evidence(row: dict[str, Any]) -> str:
         return (
@@ -1042,55 +1068,84 @@ def keyword_focus(
         for r in comp_rows
     ])
 
-    candidates: list[dict[str, Any]] = []
+    close_candidates: list[dict[str, Any]] = []
     if has_gsc:
-        striking = [r for r in queries if (r.get("position") or 0) > 10 and (r.get("impressions") or 0) > 0]
-        striking.sort(key=lambda r: -(r.get("impressions") or 0))
-        candidates.extend(
+        striking = [
+            row for row in queries
+            if (row.get("position") or 0) > 10
+            and (row.get("impressions") or 0) > 0
+            and not is_primary_variant(str(row.get("query") or ""))
+        ]
+        striking.sort(key=lambda row: -(row.get("impressions") or 0))
+        close_candidates.extend(
             {
-                "keyword": r["query"],
-                "evidence": f"{int(r.get('impressions') or 0)} impressions but avg position "
-                f"{float(r.get('position') or 0):.1f}; you already get search demand for it",
+                "keyword": row["query"],
+                "evidence": f"{int(row.get('impressions') or 0)} impressions but avg position "
+                f"{float(row.get('position') or 0):.1f}; you already get search demand for it",
                 "source": "search_console",
-                "_rank": (0, -(r.get("impressions") or 0)),
+                "_rank": (0, -(row.get("impressions") or 0)),
             }
-            for r in striking
+            for row in striking
         )
+    close_to_ranking = take(
+        [without_rank(item) for item in sort_by_volume(close_candidates)],
+        close_limit,
+    )
+
     gap_rows = [
         row for row in table
         if row.get("my_blog_status") == "missing"
         and phrase_key(row.get("keyword") or "") != target_key
         and (row.get("relevance_score") or 0) >= 0.35
     ]
-    candidates.extend(
+    gap_candidates = [
         {
-            "keyword": r["keyword"],
+            "keyword": row["keyword"],
             "evidence": "Relevant to your target keyword and missing from your page"
-            + (f" · used by {int(r.get('competitor_count') or 0)} competitors" if r.get("competitor_count") else ""),
+            + (f" · used by {int(row.get('competitor_count') or 0)} competitors" if row.get("competitor_count") else ""),
             "source": "gap",
-            "_rank": (1, -(r.get("competitor_count") or 0), -(r.get("relevance_score") or 0)),
+            "_rank": (1, -(row.get("competitor_count") or 0), -(row.get("relevance_score") or 0)),
         }
-        for r in gap_rows
+        for row in gap_rows
+    ]
+    new_topics = take(
+        [without_rank(item) for item in sort_by_volume(gap_candidates)],
+        new_limit,
     )
-    known = {c["keyword"]: volume_of(c["keyword"]) for c in candidates}
-    candidates.sort(key=lambda c: (
-        not isinstance(known[c["keyword"]], int),
-        -(known[c["keyword"]] if isinstance(known[c["keyword"]], int) else 0),
-        c["_rank"],
-    ))
-    opportunities = take([{k: v for k, v in c.items() if k != "_rank"} for c in candidates])
 
-    volume_known = any(isinstance(item["search_volume"], int) for item in opportunities)
+    opportunities = close_to_ranking + new_topics
+    close_volume = any(isinstance(item["search_volume"], int) for item in close_to_ranking)
+    new_volume = any(isinstance(item["search_volume"], int) for item in new_topics)
+    volume_known = close_volume or new_volume
+    close_note = (
+        "Queries you already get impressions for but rank below position 10 — not new topics."
+        + ("" if close_volume else " Search volume: Data unavailable (no volume API configured).")
+        if has_gsc else
+        "Connect Search Console to see queries you already rank for weakly."
+    )
+    new_note = (
+        "Topics competitors cover that your page does not use."
+        + (
+            "" if new_volume else
+            " Search volume: Data unavailable (no volume API configured). Ranked by relevance "
+            "to your target keyword and competitor use."
+        )
+    )
     return {
         "our_blog": ours,
         "our_blog_basis": "search_console" if has_gsc else "on_page",
         "competitors": competitors,
+        "close_to_ranking": close_to_ranking,
+        "close_to_ranking_basis": "volume" if close_volume else ("search_console" if has_gsc else "none"),
+        "close_to_ranking_note": close_note,
+        "new_topics": new_topics,
+        "new_topics_basis": "volume" if new_volume else "relevance",
+        "new_topics_note": new_note,
         "opportunities": opportunities,
         "opportunities_basis": "volume" if volume_known else ("search_console" if has_gsc else "relevance"),
         "note": (
             "" if volume_known else
-            "Search volume: Data unavailable (no volume API configured). Opportunities are ranked by "
-            + ("Search Console impressions, then " if has_gsc else "")
-            + "relevance to your target keyword and competitor use."
+            "Search volume: Data unavailable (no volume API configured). Close-to-ranking uses Search Console "
+            "impressions when connected; new topics use relevance and competitor use."
         ),
     }
